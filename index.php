@@ -1,12 +1,13 @@
 <?php
 declare(strict_types=1);
 
+ini_set('display_errors', '0');
 require __DIR__ . '/tester.php';
 
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: no-referrer');
-header("Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+header("Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
 
 function respond(int $status, mixed $data): never {
     http_response_code($status);
@@ -15,24 +16,74 @@ function respond(int $status, mixed $data): never {
     exit;
 }
 
+function authenticate(string $path, string $method, string $root, bool $secure, string $user, string $password): string {
+    session_name('TapinDashboard' . substr(hash('sha256', __DIR__), 0, 12));
+    if (!session_start([
+        'use_strict_mode' => 1,
+        'use_only_cookies' => 1,
+        'cookie_path' => $root,
+        'cookie_secure' => $secure,
+        'cookie_httponly' => true,
+        'cookie_samesite' => 'Lax',
+        'cache_limiter' => '',
+    ])) {
+        throw new AppError(500, 'نشست ورود روی هاست ایجاد نشد.');
+    }
+    $signature = hash_hmac('sha256', $user, $password);
+    $signedIn = hash_equals($signature, $_SESSION['dashboard_login'] ?? '');
+    $csrf = $_SESSION['dashboard_csrf'] ??= bin2hex(random_bytes(32));
+    $loginError = '';
+    if ($method === 'POST' && ($path === '/' || $path === '/logout')) {
+        $submittedToken = $_POST['csrf'] ?? null;
+        if (!is_string($submittedToken) || !hash_equals($csrf, $submittedToken)) {
+            session_write_close();
+            throw new AppError(403, 'نشست فرم معتبر نیست. صفحه را دوباره باز کنید.');
+        }
+        if ($path === '/logout') {
+            $_SESSION = [];
+            session_destroy();
+            setcookie(session_name(), '', [
+                'expires' => 1, 'path' => $root, 'secure' => $secure, 'httponly' => true, 'samesite' => 'Lax',
+            ]);
+            header('Location: ' . $root, true, 303);
+            exit;
+        }
+        if (!$signedIn) {
+            $submittedUser = $_POST['username'] ?? null;
+            $submittedPassword = $_POST['password'] ?? null;
+            if (is_string($submittedUser) && is_string($submittedPassword) &&
+                hash_equals($user, $submittedUser) && hash_equals($password, $submittedPassword)) {
+                if (!session_regenerate_id(true)) throw new AppError(500, 'نشست ورود روی هاست ایجاد نشد.');
+                $_SESSION['dashboard_login'] = $signature;
+                $_SESSION['dashboard_csrf'] = bin2hex(random_bytes(32));
+                session_write_close();
+                header('Location: ' . $root, true, 303);
+                exit;
+            }
+            $loginError = 'نام کاربری یا رمز عبور اشتباه است.';
+        }
+    }
+    session_write_close();
+
+    if (!$signedIn) {
+        if ($path === '/' && in_array($method, ['GET', 'POST'], true)) {
+            http_response_code($loginError === '' ? 200 : 401);
+            header('Content-Type: text/html; charset=utf-8');
+            require __DIR__ . '/public/login.php';
+            exit;
+        }
+        throw new AppError(401, 'برای ادامه از صفحه اصلی وارد داشبورد شوید.');
+    }
+
+    if ($path !== '/') return '';
+    return '<form class="logout" action="./logout" method="post"><input type="hidden" name="csrf" value="' .
+        $csrf . '"><button type="submit">خروج از داشبورد</button></form>';
+}
+
 try {
     $envFile = __DIR__ . '/.env';
     $env = is_readable($envFile) ? parse_ini_file($envFile, false, INI_SCANNER_RAW) : false;
     if ($env === false) throw new AppError(500, 'فایل تنظیمات .env را در روت پروژه بسازید.');
-
-    $user = $env['DASHBOARD_USER'] ?? '';
-    $password = $env['DASHBOARD_PASSWORD'] ?? '';
-    if ($user === '' || str_contains($user, ':') || strlen($password) < 12) {
-        throw new AppError(500, 'نام کاربری و رمز حداقل ۱۲ کاراکتری داشبورد را در .env تنظیم کنید.');
-    }
-    $authorization = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
-    $credentials = isset($_SERVER['PHP_AUTH_USER'])
-        ? $_SERVER['PHP_AUTH_USER'] . ':' . ($_SERVER['PHP_AUTH_PW'] ?? '')
-        : (preg_match('/^Basic (\S+)$/iD', $authorization, $matches) ? base64_decode($matches[1], true) : false);
-    if (!is_string($credentials) || !hash_equals($user . ':' . $password, $credentials)) {
-        header('WWW-Authenticate: Basic realm="Tapin API", charset="UTF-8"');
-        respond(401, ['error' => 'نام کاربری و رمز داشبورد را وارد کنید.']);
-    }
 
     $base = parse_url($env['BASE_URL'] ?? '');
     if (empty($base['host']) || !in_array($base['scheme'] ?? '', ['http', 'https'], true) ||
@@ -54,6 +105,16 @@ try {
     }
     $path = substr($requestPath, strlen($prefix));
 
+    $user = $env['DASHBOARD_USER'] ?? 'admin';
+    $password = $env['DASHBOARD_PASSWORD'] ?? '';
+    $logout = '';
+    if ($password !== '' && $path !== '/style.css') {
+        if ($user === '' || strlen($password) < 12) {
+            throw new AppError(500, 'برای فعال کردن ورود، نام کاربری و رمز حداقل ۱۲ کاراکتری تنظیم کنید.');
+        }
+        $logout = authenticate($path, $method, $prefix . '/', $base['scheme'] === 'https', $user, $password);
+    }
+
     $assets = [
         '/' => ['index.html', 'text/html'],
         '/app.js' => ['app.js', 'text/javascript'],
@@ -63,7 +124,11 @@ try {
     if ($method === 'GET' && isset($assets[$path])) {
         [$file, $mime] = $assets[$path];
         header('Content-Type: ' . $mime . '; charset=utf-8');
-        readfile(__DIR__ . '/public/' . $file);
+        if ($path === '/') {
+            echo str_replace('<!-- dashboard-logout -->', $logout, file_get_contents(__DIR__ . '/public/' . $file));
+        } else {
+            readfile(__DIR__ . '/public/' . $file);
+        }
         exit;
     }
     if (preg_match('~^/api/(post|tipax|rail|woo)/(profiles|remove|run|details)$~D', $path, $parts)) {

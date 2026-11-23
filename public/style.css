@@ -91,3 +91,19 @@ dialog::backdrop { background: #070911b8; }
   .hero-mark { display: none; }
   nav button { padding-inline: 7px; gap: 3px; }
 }
+
+.login-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+  background: radial-gradient(ellipse at 75% 15%, #27213e, var(--background) 55%);
+}
+.login-card { width: min(100%, 420px); padding: clamp(24px, 6vw, 40px); }
+.login-card .brand { padding: 0; }
+.login-card h1 { margin-block: 22px 14px; font-size: clamp(23px, 5vw, 30px); }
+.login-card form { display: grid; gap: 14px; }
+.login-card form button { margin-top: 5px; }
+.login-card .error { margin-bottom: 14px; }
+.logout { margin-top: 20px; }
+.logout button { width: 100%; }

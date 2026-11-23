@@ -1,7 +1,6 @@
 DirectoryIndex index.php
 RewriteEngine On
 RewriteRule (^|/)\. - [F,END]
-RewriteRule ^tester\.php$ - [F,END]
-RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteRule ^(?:tester\.php|public/login\.php)$ - [F,END]
 RewriteRule ^index\.php$ - [L]
 RewriteRule ^ index.php [END]
