@@ -38,7 +38,7 @@ main { width: min(100%, 1280px); margin-inline: auto; padding: 34px clamp(18px, 
 h1 { font-size: clamp(30px, 5vw, 49px); line-height: 1.38; margin-block: 4px 9px; }
 #service-description { color: #d0cae2; }
 .hero-mark { display: grid; place-items: center; flex: 0 0 94px; aspect-ratio: 1; border-radius: 24px; color: var(--accent); background: #191827; border: 1px solid color-mix(in srgb, var(--accent) 50%, #212139); box-shadow: 10px 10px 0 #10101d77, 0 0 38px #a992ff26; transform: rotate(-7deg); }
-.hero-mark span { font: bold 40px/1 monospace; transform: rotate(7deg); }
+#hero-icon { font: bold 40px/1 monospace; transform: rotate(7deg); }
 .workspace { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 18px; margin-top: 21px; align-items: start; }
 .panel { background: var(--panel); border: 1px solid var(--border); padding: clamp(15px, 2.8vw, 24px); border-radius: 17px; min-width: 0; }
 .full { grid-column: 1/-1; }
@@ -148,3 +148,15 @@ dialog::backdrop { background: #070911b8; }
 @media (max-width: 860px) {
   .connection-index { width: auto; margin-top: 10px; }
 }
+
+.service-graphic { display: block; width: var(--service-icon-size, 21px); height: var(--service-icon-size, 21px); }
+.hero-service-icon { --service-icon-size: 54px; display: grid; place-items: center; }
+.directory-service { display: flex; align-items: center; gap: 6px; }
+.response-viewer { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.response-label { font-size: 12px; color: var(--muted); }
+.response-toolbar, .response-search { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.response-toolbar button, .response-search button { min-height: 32px; padding: 4px 9px; font-size: 12px; }
+.response-search input { flex: 1 1 135px; width: auto; }
+.response-search span { font-size: 12px; }
+.response-viewer pre { position: relative; }
+.response-viewer mark { color: #201500; background: #ffd05f; border-radius: 3px; }

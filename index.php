@@ -118,6 +118,9 @@ try {
     $assets = [
         '/' => ['index.html', 'text/html'],
         '/app.js' => ['app.js', 'text/javascript'],
+        '/post.svg' => ['post.svg', 'image/svg+xml'],
+        '/tipax.svg' => ['tipax.svg', 'image/svg+xml'],
+        '/rail.svg' => ['rail.svg', 'image/svg+xml'],
         '/favicon.svg' => ['favicon.svg', 'image/svg+xml'],
         '/style.css' => ['style.css', 'text/css'],
         '/catalog.json' => ['catalog.json', 'application/json'],

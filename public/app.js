@@ -2,9 +2,9 @@ const catalog = await fetch(new URL('./catalog.json', import.meta.url)).then(res
 
 const services = {
   woo: { title: 'ووکامرس', description: 'سطح دسترسی کلید فروشگاه را بررسی کنید و آخرین سفارش‌ها را ببینید.', icon: 'W', color: '#bda9ff', fields: ['site', 'key', 'secret'] },
-  post: { title: 'پست', description: 'درخواست‌های فروشگاه، سفارش، رهگیری و چاپ را بررسی کنید.', icon: '✉', color: '#f2c879', fields: ['auth', 'shop_id', 'order_id', 'order_uuid', 'task_id'] },
-  tipax: { title: 'تیپاکس', description: 'استعلام قیمت، سفارش‌ها و وضعیت مرسوله‌های تیپاکس را بررسی کنید.', icon: '⇢', color: '#f5a99e', fields: ['auth', 'shop_id', 'order_uuid', 'hash'] },
-  rail: { title: 'قطاربار', description: 'وب‌سرویس‌های سفارش و رهگیری قطاربار را بررسی کنید.', icon: '↔', color: '#89ddcd', fields: ['auth', 'shop_id', 'order_uuid', 'hash'] }
+  post: { title: 'پست', description: 'درخواست‌های فروشگاه، سفارش، رهگیری و چاپ را بررسی کنید.', graphic: 'post.svg', color: '#f2c879', fields: ['auth', 'shop_id', 'order_id', 'order_uuid', 'task_id'] },
+  tipax: { title: 'تیپاکس', description: 'استعلام قیمت، سفارش‌ها و وضعیت مرسوله‌های تیپاکس را بررسی کنید.', graphic: 'tipax.svg', color: '#f5a99e', fields: ['auth', 'shop_id', 'order_uuid', 'hash'] },
+  rail: { title: 'قطاربار', description: 'وب‌سرویس‌های سفارش و رهگیری قطاربار را بررسی کنید.', graphic: 'rail.svg', color: '#89ddcd', fields: ['auth', 'shop_id', 'order_uuid', 'hash'] }
 };
 const labels = { site: 'آدرس فروشگاه', key: 'کلید دسترسی', secret: 'رمز کلید', auth: 'توکن Authorization',
   shop_id: 'شناسه فروشگاه · shop_id', order_id: 'شناسه سفارش · order_id', order_uuid: 'شناسه سفارش · order_uuid',
@@ -18,6 +18,17 @@ function node(tag, text = '', className = '') {
   element.textContent = text;
   element.className = className;
   return element;
+}
+function serviceIcon(config, className = '') {
+  const icon = node('span', config.icon ?? '', className);
+  icon.setAttribute('aria-hidden', 'true');
+  if (config.graphic) {
+    const graphic = node('img', '', 'service-graphic');
+    graphic.alt = '';
+    graphic.src = new URL(config.graphic, import.meta.url).href;
+    icon.append(graphic);
+  }
+  return icon;
 }
 function button(text, callback, className = '') {
   const element = node('button', text, className);
@@ -110,8 +121,7 @@ function connectionPanel(service, onChange) {
     const options = [{ id: null, name: 'اتصال جدید' }, ...profiles];
     choices.replaceChildren(...options.map(profile => {
       const card = button('', () => select(profile.id), 'profile-choice');
-      const icon = node('span', profile.id == null ? '+' : config.icon, 'profile-choice-icon');
-      icon.setAttribute('aria-hidden', 'true');
+      const icon = serviceIcon(profile.id == null ? { icon: '+' } : config, 'profile-choice-icon');
       card.append(icon, node('span', profile.name));
       card.setAttribute('aria-pressed', String(selectedId === profile.id));
       return card;
@@ -354,6 +364,119 @@ function requestEditor(service, endpoint, request, drafts) {
   return { message, reset, retry, ready };
 }
 
+function responseViewer() {
+  const panel = node('section', '', 'response-viewer');
+  const toolbar = node('div', '', 'response-toolbar');
+  const output = node('pre');
+  output.dir = 'ltr';
+  output.tabIndex = 0;
+  output.setAttribute('aria-label', 'متن پاسخ سرویس');
+  const copyStatus = status();
+  let text = '';
+  const copy = button('کپی پاسخ', async () => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const selection = window.getSelection();
+        if (!selection) throw new Error();
+        const ranges = Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index));
+        let copied;
+        try {
+          selection.selectAllChildren(output);
+          copied = document.execCommand('copy');
+        } finally {
+          selection.removeAllRanges();
+          for (const range of ranges) selection.addRange(range);
+        }
+        if (!copied) throw new Error();
+      }
+      report(copyStatus, 'پاسخ کپی شد.', 'ok');
+    } catch {
+      report(copyStatus, 'کپی خودکار انجام نشد. متن پاسخ را انتخاب و کپی کنید.', 'error');
+    }
+  });
+
+  const search = node('div', '', 'response-search');
+  search.hidden = true;
+  const input = node('input');
+  input.type = 'search';
+  input.dir = 'auto';
+  input.maxLength = 256;
+  input.placeholder = 'جست‌وجو در پاسخ';
+  input.setAttribute('aria-label', 'جست‌وجو در پاسخ');
+  const count = node('span', '', 'muted');
+  count.role = 'status';
+  let matches = [];
+  let active = 0;
+
+  function render() {
+    previous.disabled = next.disabled = matches.length < 2;
+    count.textContent = matches.length
+      ? number.format(active + 1) + ' از ' + number.format(matches.length)
+      : input.value && !search.hidden ? 'نتیجه‌ای پیدا نشد.' : '';
+    if (!matches.length) {
+      output.textContent = text;
+      return;
+    }
+    const start = matches[active];
+    const end = start + input.value.length;
+    const mark = node('mark', text.slice(start, end));
+    output.replaceChildren(text.slice(0, start), mark, text.slice(end));
+    output.scrollTop = mark.offsetTop - output.clientHeight / 2 + mark.offsetHeight / 2;
+  }
+  function find() {
+    matches = [];
+    active = 0;
+    if (input.value && !search.hidden) {
+      const escaped = input.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const match of text.matchAll(new RegExp(escaped, 'giu'))) matches.push(match.index);
+    }
+    render();
+  }
+  function move(delta) {
+    if (!matches.length) return;
+    active = (active + delta + matches.length) % matches.length;
+    render();
+  }
+  const previous = button('قبلی', () => move(-1));
+  const next = button('بعدی', () => move(1));
+  function toggleSearch(open) {
+    search.hidden = !open;
+    searchButton.setAttribute('aria-expanded', String(open));
+    find();
+    if (open) input.focus();
+    else searchButton.focus();
+  }
+  const searchButton = button('جست‌وجو', () => toggleSearch(search.hidden));
+  searchButton.setAttribute('aria-expanded', 'false');
+  input.addEventListener('input', find);
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      move(event.shiftKey ? -1 : 1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      toggleSearch(false);
+    }
+  });
+  search.append(input, previous, next, count);
+  toolbar.append(copy, searchButton);
+  copy.disabled = searchButton.disabled = true;
+  panel.append(node('div', 'پاسخ سرویس', 'response-label'), toolbar, search, output, copyStatus);
+
+  return {
+    panel,
+    update(value) {
+      text = value;
+      copy.disabled = searchButton.disabled = !value;
+      report(copyStatus, '');
+      output.scrollTop = 0;
+      find();
+    }
+  };
+}
+
 function shippingView(service, view) {
   const endpoints = catalog[service];
   const drafts = api(service, 'drafts').then(values => ({ values }), error => ({ error: error.message }));
@@ -416,8 +539,7 @@ function shippingView(service, view) {
     const path = node('code', endpoint.url);
     path.dir = 'ltr';
     const actions = node('div', '', 'actions');
-    const response = node('pre');
-    response.dir = 'ltr';
+    const response = responseViewer();
     const split = node('div', '', 'split');
     const request = node('textarea');
     request.dir = 'ltr';
@@ -429,7 +551,7 @@ function shippingView(service, view) {
       split.append(body);
       actions.append(editor.reset, editor.retry);
     }
-    split.append(field('پاسخ سرویس', response));
+    split.append(response.panel);
     const message = status();
     const open = node('a', 'باز کردن در تب جدید', 'badge');
     open.target = '_blank';
@@ -439,7 +561,7 @@ function shippingView(service, view) {
       await editor?.ready;
       report(message, 'در حال ارسال…');
       summaryStatus.textContent = '…';
-      response.textContent = '';
+      response.update('');
       open.hidden = true;
       try {
         const result = await api(service, 'run', { ...connection.payload(), endpoint: endpoint.id, body: request.value });
@@ -447,8 +569,8 @@ function shippingView(service, view) {
         const short = 'HTTP ' + result.status + ' · ' + result.ms + ' ms';
         report(message, short, ok ? 'ok' : 'error');
         summaryStatus.textContent = short;
-        try { response.textContent = JSON.stringify(JSON.parse(result.body), null, 2); }
-        catch { response.textContent = result.body; }
+        try { response.update(JSON.stringify(JSON.parse(result.body), null, 2)); }
+        catch { response.update(result.body); }
         for (const [name, value] of Object.entries(result.captured)) {
           connection.inputs[name].value = value;
         }
@@ -508,7 +630,7 @@ function show(service) {
   document.documentElement.style.setProperty('--accent', config.color);
   byId('service-title').textContent = config.title;
   byId('service-description').textContent = config.description;
-  byId('hero-icon').textContent = config.icon;
+  byId('hero-icon').replaceChildren(serviceIcon(config, 'hero-service-icon'));
   if (!views.has(service)) {
     const content = node('div', '', 'workspace');
     const connection = service === 'woo' ? wooView(content) : shippingView(service, content);
@@ -526,9 +648,8 @@ function show(service) {
 for (const [service, config] of Object.entries(services)) {
   const tab = button(config.title, () => { location.hash = service; });
   tab.dataset.service = service;
-  const icon = node('span', config.icon, 'nav-icon');
+  const icon = serviceIcon(config, 'nav-icon');
   icon.style.setProperty('--nav-color', config.color);
-  icon.setAttribute('aria-hidden', 'true');
   tab.prepend(icon);
   nav.append(tab);
 }
@@ -555,7 +676,10 @@ directoryButton.addEventListener('click', async () => {
       const result = results[index];
       const group = node('section', '', 'connection-group');
       group.style.setProperty('--connection-color', config.color);
-      const heading = node('h3', config.title);
+      const heading = node('h3');
+      const serviceName = node('span', '', 'directory-service');
+      serviceName.append(serviceIcon(config, 'nav-icon'), node('span', config.title));
+      heading.append(serviceName);
       group.append(heading);
       if (result.status === 'fulfilled') {
         heading.append(node('span', number.format(result.value.length), 'badge'));
