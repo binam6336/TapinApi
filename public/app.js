@@ -51,7 +51,7 @@ function facts(pairs) {
   return list;
 }
 async function api(service, action, input) {
-  const response = await fetch('/api/' + service + '/' + action, input == null ? {} : {
+  const response = await fetch(new URL('./api/' + service + '/' + action, import.meta.url), input == null ? {} : {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input)
   });
   const result = await response.json();

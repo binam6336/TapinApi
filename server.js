@@ -13,6 +13,15 @@ if (!DATABASE_PATH || !/^[a-f\d]{64}$/i.test(DATABASE_KEY ?? '') || !DASHBOARD_U
     DASHBOARD_USER.includes(':') || (DASHBOARD_PASSWORD?.length ?? 0) < 12) {
   throw new Error('Set DATABASE_PATH, a 64-character hex DATABASE_KEY, DASHBOARD_USER and a DASHBOARD_PASSWORD of at least 12 characters in .env.');
 }
+const port = Number(process.env.PORT ?? 3000);
+const baseUrl = new URL(process.env.BASE_URL ?? 'http://127.0.0.1:' + port + '/');
+if (!['http:', 'https:'].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password ||
+    baseUrl.href.includes('?') || baseUrl.href.includes('#') || baseUrl.pathname.startsWith('//')) {
+  throw new Error('BASE_URL must be an absolute HTTP(S) URL without credentials, a query or a fragment.');
+}
+const basePath = baseUrl.pathname.replace(/\/+$/, '');
+baseUrl.pathname = basePath + '/';
+
 process.umask(0o077);
 const databasePath = resolve(DATABASE_PATH);
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -314,7 +323,13 @@ createServer(async (req, res) => {
     res.setHeader('WWW-Authenticate', 'Basic realm="Tapin API", charset="UTF-8"');
     return json(res, 401, { error: 'نام کاربری و رمز داشبورد را وارد کنید.' });
   }
-  const path = req.url.split('?')[0];
+  const requestPath = req.url.split('?')[0];
+  if (req.method === 'GET' && basePath && requestPath === basePath) {
+    res.writeHead(308, { Location: basePath + '/' + req.url.slice(requestPath.length) });
+    return res.end();
+  }
+  if (!requestPath.startsWith(basePath + '/')) return json(res, 404, { error: 'صفحه پیدا نشد.' });
+  const path = requestPath.slice(basePath.length);
   try {
     if (path.startsWith('/api/')) return json(res, 200, await api(req, path));
     const asset = assets.get(path);
@@ -331,4 +346,6 @@ createServer(async (req, res) => {
     console.error('Request failed:', error.code ?? error.name);
     return json(res, 502, { error: 'ارتباط با سرویس یا دیتابیس برقرار نشد.' });
   }
-}).listen(Number(process.env.PORT ?? 3000), process.env.HOST ?? '127.0.0.1');
+}).listen(port, process.env.HOST ?? '127.0.0.1', () => {
+  console.log('Tapin API dashboard: ' + baseUrl.href);
+});
