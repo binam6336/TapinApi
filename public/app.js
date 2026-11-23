@@ -1,4 +1,4 @@
-import { catalog } from './catalog.js';
+const catalog = await fetch(new URL('./catalog.json', import.meta.url)).then(response => response.json());
 
 const services = {
   woo: { title: 'ووکامرس', description: 'سطح دسترسی کلید فروشگاه را بررسی کنید و آخرین سفارش‌ها را ببینید.', icon: 'W', color: '#bda9ff', fields: ['site', 'key', 'secret'] },
