@@ -76,12 +76,49 @@ function readInput(): object {
     return $input;
 }
 
+function requestDrafts(array $env, string $method, string $service, string $key): mixed {
+    if ($service === 'woo') throw new AppError(404, 'مسیر پیدا نشد.');
+    if (!in_array($method, ['GET', 'POST'], true)) throw new AppError(405, 'روش درخواست نامعتبر است.');
+    $db = database($env);
+    if ($db->query("SHOW TABLES LIKE 'request\_drafts'")->fetchColumn() === false) {
+        $db->exec('CREATE TABLE IF NOT EXISTS request_drafts (
+            service VARCHAR(16) NOT NULL,
+            endpoint VARCHAR(64) NOT NULL,
+            data MEDIUMTEXT NOT NULL,
+            PRIMARY KEY (service, endpoint)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin');
+    }
+    if ($method === 'GET') {
+        $drafts = [];
+        foreach (query($db, 'SELECT endpoint, data FROM request_drafts WHERE service = ?', [$service]) as $row) {
+            $drafts[$row['endpoint']] = unseal($row['data'], $key)['body'];
+        }
+        return (object) $drafts;
+    }
+    $input = readInput();
+    $id = $input->endpoint ?? null;
+    $endpoint = is_string($id) ? (shippingEndpoints($service)[$id] ?? null) : null;
+    if (($endpoint['method'] ?? null) !== 'POST') throw new AppError(404, 'مسیر قابل ویرایش پیدا نشد.');
+    if (!property_exists($input, 'body') || ($input->body !== null && !is_string($input->body))) {
+        throw new AppError(400, 'بدنه پیش‌نویس نامعتبر است.');
+    }
+    if ($input->body === null) {
+        query($db, 'DELETE FROM request_drafts WHERE service = ? AND endpoint = ?', [$service, $id]);
+    } else {
+        $data = seal(['body' => $input->body], $key);
+        query($db, 'INSERT INTO request_drafts (service, endpoint, data) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE data = ?', [$service, $id, $data, $data]);
+    }
+    return ['ok' => true];
+}
+
 function api(array $env, string $method, string $service, string $action): mixed {
     $hexKey = $env['DATABASE_KEY'] ?? '';
     if (!preg_match('/^[0-9a-f]{64}$/iD', $hexKey)) {
         throw new AppError(500, 'کلید ۶۴ کاراکتری DATABASE_KEY را در .env تنظیم کنید.');
     }
     $key = hex2bin($hexKey);
+    if ($action === 'drafts') return requestDrafts($env, $method, $service, $key);
     if ($action === 'profiles' && $method === 'GET') {
         return query(database($env), 'SELECT id, name FROM profiles WHERE service = ? ORDER BY name', [$service])->fetchAll();
     }
@@ -222,10 +259,14 @@ function replaceBody(mixed $value, array $values, bool $numeric): mixed {
     return preg_replace_callback('/\{\{(\w+)\}\}/', $substitute, $value);
 }
 
-function shipping(string $service, array $values, object $input): array {
+function shippingEndpoints(string $service): array {
     $catalog = json_decode(file_get_contents(__DIR__ . '/public/catalog.json'), true, 512, JSON_THROW_ON_ERROR);
+    return array_column($catalog[$service], null, 'id');
+}
+
+function shipping(string $service, array $values, object $input): array {
     $id = $input->endpoint ?? null;
-    $endpoint = is_string($id) ? (array_column($catalog[$service], null, 'id')[$id] ?? null) : null;
+    $endpoint = is_string($id) ? (shippingEndpoints($service)[$id] ?? null) : null;
     if (!$endpoint) throw new AppError(404, 'مسیر تست پیدا نشد.');
     $url = preg_replace_callback('/\{\{(\w+)\}\}/', static function (array $match) use ($values): string {
         $value = $values[$match[1]] ?? '';

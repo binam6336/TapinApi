@@ -107,3 +107,44 @@ dialog::backdrop { background: #070911b8; }
 .login-card .error { margin-bottom: 14px; }
 .logout { margin-top: 20px; }
 .logout button { width: 100%; }
+
+.connection-index {
+  justify-content: flex-start;
+  width: 100%;
+  margin-top: 20px;
+  border-style: dashed;
+}
+.profile-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
+.profile-picker legend { padding: 0; margin-block-end: 8px; font-size: 12px; color: var(--muted); }
+.profile-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr)); gap: 8px; }
+.profile-choice {
+  min-height: 54px;
+  justify-content: flex-start;
+  gap: 9px;
+  text-align: start;
+  background: var(--input);
+  overflow-wrap: anywhere;
+}
+.profile-choice[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 15%, var(--input));
+  border-color: var(--accent);
+}
+.profile-choice-icon {
+  display: grid;
+  flex: 0 0 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--input));
+  font: bold 16px monospace;
+}
+.profile-picker + .status { margin-block: 9px 13px; }
+.connection-directory { width: min(650px, calc(100% - 30px)); max-height: 85vh; }
+.connection-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr)); gap: 12px; margin-top: 16px; }
+.connection-group { min-width: 0; border: 1px solid var(--border); border-inline-start: 3px solid var(--connection-color); border-radius: 12px; padding: 12px; }
+.connection-group h3 { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0 0 7px; }
+.directory-profile { display: flex; width: 100%; justify-content: flex-start; margin-top: 6px; text-align: start; overflow-wrap: anywhere; }
+@media (max-width: 860px) {
+  .connection-index { width: auto; margin-top: 10px; }
+}

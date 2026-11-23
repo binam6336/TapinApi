@@ -65,7 +65,14 @@ function connectionPanel(service, onChange) {
   const form = node('form');
   form.autocomplete = 'off';
   const heading = node('h2', 'اطلاعات اتصال');
-  const profiles = node('select');
+  const picker = node('fieldset', '', 'profile-picker');
+  const choices = node('div', '', 'profile-choices');
+  const profileCount = node('span', '', 'badge');
+  const legend = node('legend', 'اتصال‌ها ');
+  legend.append(profileCount);
+  picker.append(legend, choices);
+  let profiles = [];
+  let selectedId = null;
   const name = node('input');
   name.maxLength = 80;
   name.placeholder = 'برای نمونه، فروشگاه اصلی';
@@ -85,9 +92,8 @@ function connectionPanel(service, onChange) {
   const help = node('p', '', 'status muted');
   const message = status();
   const actions = node('div', '', 'actions');
-  const controls = node('div', '', 'fields');
-  controls.append(field('اتصال ذخیره‌شده', profiles), field('نام اتصال برای ذخیره', name));
-  const profileId = () => profiles.value ? Number(profiles.value) : null;
+  fields.append(field('نام اتصال برای ذخیره', name));
+  const profileId = () => selectedId;
   const payload = () => ({
     profileId: profileId(),
     values: Object.fromEntries(Object.entries(inputs).filter(([, input]) => input.value.trim()).map(([key, input]) => [key, input.value.trim()]))
@@ -99,14 +105,40 @@ function connectionPanel(service, onChange) {
       ? 'برای استفاده از مقدار ذخیره‌شده، فیلد مربوط را خالی بگذارید.'
       : 'برای تست فوری، فیلدهای اتصال را پر کنید. ذخیره اختیاری است.';
   }
-  async function refresh(selected = null) {
-    const connections = await api(service, 'profiles');
-    profiles.replaceChildren(new Option('اتصال جدید', ''), ...connections.map(connection => new Option(connection.name, connection.id)));
-    profiles.value = selected == null ? '' : String(selected);
+  function renderProfiles() {
+    profileCount.textContent = number.format(profiles.length);
+    const options = [{ id: null, name: 'اتصال جدید' }, ...profiles];
+    choices.replaceChildren(...options.map(profile => {
+      const card = button('', () => select(profile.id), 'profile-choice');
+      const icon = node('span', profile.id == null ? '+' : config.icon, 'profile-choice-icon');
+      icon.setAttribute('aria-hidden', 'true');
+      card.append(icon, node('span', profile.name));
+      card.setAttribute('aria-pressed', String(selectedId === profile.id));
+      return card;
+    }));
     updateHelp();
   }
+  function select(id) {
+    if (picker.disabled) return;
+    const profile = profiles.find(item => item.id === id);
+    if (id != null && !profile) return;
+    if (id === selectedId) return;
+    selectedId = id;
+    for (const input of Object.values(inputs)) input.value = '';
+    name.value = profile?.name ?? '';
+    report(message, '');
+    renderProfiles();
+    choices.querySelector('[aria-pressed="true"]')?.focus();
+    onChange();
+  }
+  async function refresh(selected = null) {
+    profiles = await api(service, 'profiles');
+    selectedId = selected;
+    renderProfiles();
+  }
   async function busy(operation) {
-    const controls = [...form.querySelectorAll('button, input, select')];
+    const controls = [...form.querySelectorAll('button, input')].filter(control => !picker.contains(control));
+    controls.push(picker);
     const enabled = controls.filter(control => !control.disabled);
     for (const control of enabled) control.disabled = true;
     try { await operation(); }
@@ -135,22 +167,26 @@ function connectionPanel(service, onChange) {
       report(message, 'اتصال حذف شد.', 'ok');
     });
   }, 'danger');
-  profiles.addEventListener('change', () => {
-    for (const input of Object.values(inputs)) input.value = '';
-    name.value = profileId() ? profiles.selectedOptions[0].text : '';
-    report(message, '');
-    updateHelp();
-    onChange();
-  });
   for (const input of Object.values(inputs)) input.addEventListener('input', onChange);
   form.addEventListener('submit', event => event.preventDefault());
   actions.append(save, remove);
-  form.append(heading, controls, help, fields, actions, message);
+  form.append(heading, picker, help, fields, actions, message);
   panel.append(form);
-  updateHelp();
-  profiles.disabled = true;
-  refresh().catch(error => report(message, error.message, 'error')).finally(() => { profiles.disabled = false; });
-  return { panel, form, fields, inputs, actions, payload, busy };
+  renderProfiles();
+  picker.disabled = true;
+  const ready = refresh().catch(error => report(message, error.message, 'error')).finally(() => { picker.disabled = false; });
+  return {
+    panel, form, fields, inputs, actions, payload, busy,
+    async openProfile(profile) {
+      await ready;
+      if (!profiles.some(item => item.id === profile.id)) await refresh(selectedId);
+      if (picker.disabled || !profiles.some(item => item.id === profile.id)) {
+        throw new Error('اتصال در دسترس نیست. دوباره تلاش کنید.');
+      }
+      select(profile.id);
+      panel.scrollIntoView({ block: 'nearest' });
+    }
+  };
 }
 
 const orderStatuses = {
@@ -256,10 +292,71 @@ function wooView(view) {
   connection.actions.prepend(run);
   connection.form.addEventListener('submit', () => run.click());
   view.append(connection.panel, scopePanel, orderPanel, dialog);
+  return connection;
+}
+
+function requestEditor(service, endpoint, request, drafts) {
+  const template = JSON.stringify(endpoint.body, null, 2);
+  const message = status('در حال بارگیری پیش‌نویس…');
+  const retry = button('تلاش دوباره', () => void flush());
+  retry.hidden = true;
+  let timer;
+  let pending;
+  let saving = false;
+
+  async function flush() {
+    clearTimeout(timer);
+    if (saving || pending === undefined) return;
+    const body = pending;
+    pending = undefined;
+    saving = true;
+    retry.hidden = true;
+    report(message, 'در حال ذخیره…');
+    let saved = false;
+    try {
+      await api(service, 'drafts', { endpoint: endpoint.id, body });
+      saved = true;
+      if (pending === undefined) report(message, body === null ? 'نمونه پیش‌فرض بازیابی شد.' : 'پیش‌نویس ذخیره شد.', 'ok');
+    } catch (error) {
+      if (pending === undefined) pending = body;
+      report(message, error.message, 'error');
+      retry.hidden = false;
+    } finally {
+      saving = false;
+      if (saved && pending !== undefined) void flush();
+    }
+  }
+
+  function schedule(body, immediately = false) {
+    pending = body;
+    retry.hidden = true;
+    clearTimeout(timer);
+    if (immediately) void flush();
+    else {
+      report(message, 'در انتظار ذخیره…');
+      timer = setTimeout(flush, 400);
+    }
+  }
+
+  const reset = button('بازنشانی JSON', () => {
+    request.value = template;
+    schedule(null, true);
+  });
+  request.value = template;
+  request.disabled = reset.disabled = true;
+  const ready = drafts.then(result => {
+    request.value = result.values?.[endpoint.id] ?? template;
+    report(message, result.error ?? '', result.error ? 'error' : 'muted');
+    request.disabled = reset.disabled = false;
+  });
+  request.addEventListener('input', () => schedule(request.value));
+  request.addEventListener('blur', () => { if (retry.hidden) void flush(); });
+  return { message, reset, retry, ready };
 }
 
 function shippingView(service, view) {
   const endpoints = catalog[service];
+  const drafts = api(service, 'drafts').then(values => ({ values }), error => ({ error: error.message }));
   const cards = [];
   let running = false;
   const connection = connectionPanel(service, () => {});
@@ -325,11 +422,12 @@ function shippingView(service, view) {
     const request = node('textarea');
     request.dir = 'ltr';
     request.spellcheck = false;
-    if (endpoint.method === 'POST') {
-      const template = JSON.stringify(endpoint.body, null, 2);
-      request.value = template;
-      split.append(field('بدنه درخواست (JSON)', request));
-      actions.append(button('بازنشانی JSON', () => { request.value = template; }));
+    const editor = endpoint.method === 'POST' ? requestEditor(service, endpoint, request, drafts) : null;
+    if (editor) {
+      const body = node('div');
+      body.append(field('بدنه درخواست (JSON)', request), editor.message);
+      split.append(body);
+      actions.append(editor.reset, editor.retry);
     }
     split.append(field('پاسخ سرویس', response));
     const message = status();
@@ -338,6 +436,7 @@ function shippingView(service, view) {
     open.rel = 'noreferrer noopener';
     open.hidden = true;
     async function send() {
+      await editor?.ready;
       report(message, 'در حال ارسال…');
       summaryStatus.textContent = '…';
       response.textContent = '';
@@ -395,6 +494,7 @@ function shippingView(service, view) {
   search.addEventListener('input', filter);
   filter();
   view.append(connection.panel, tools, list);
+  return connection;
 }
 
 const views = new Map();
@@ -411,17 +511,17 @@ function show(service) {
   byId('hero-icon').textContent = config.icon;
   if (!views.has(service)) {
     const content = node('div', '', 'workspace');
-    if (service === 'woo') wooView(content);
-    else shippingView(service, content);
-    views.set(service, content);
+    const connection = service === 'woo' ? wooView(content) : shippingView(service, content);
+    views.set(service, { content, connection });
   }
   const current = byId('workspace');
-  const next = views.get(service);
+  const { content: next, connection } = views.get(service);
   if (current !== next) {
     current.removeAttribute('id');
     next.id = 'workspace';
     current.replaceWith(next);
   }
+  return connection;
 }
 for (const [service, config] of Object.entries(services)) {
   const tab = button(config.title, () => { location.hash = service; });
@@ -432,6 +532,57 @@ for (const [service, config] of Object.entries(services)) {
   tab.prepend(icon);
   nav.append(tab);
 }
+const directory = node('dialog', '', 'connection-directory');
+directory.setAttribute('aria-label', 'لیست اتصال‌ها');
+const directoryHeader = node('div', '', 'topline');
+directoryHeader.append(node('h2', 'لیست اتصال‌ها'), button('بستن', () => directory.close()));
+const directoryStatus = status();
+const directoryList = node('div', '', 'connection-groups');
+directory.append(directoryHeader, directoryStatus, directoryList);
+document.body.append(directory);
+
+const directoryButton = byId('connection-index');
+directoryButton.setAttribute('aria-haspopup', 'dialog');
+directoryButton.addEventListener('click', async () => {
+  directoryList.replaceChildren();
+  report(directoryStatus, 'در حال دریافت اتصال‌ها…');
+  directory.showModal();
+  directoryButton.disabled = true;
+  try {
+    const entries = Object.entries(services);
+    const results = await Promise.allSettled(entries.map(([service]) => api(service, 'profiles')));
+    for (const [index, [service, config]] of entries.entries()) {
+      const result = results[index];
+      const group = node('section', '', 'connection-group');
+      group.style.setProperty('--connection-color', config.color);
+      const heading = node('h3', config.title);
+      group.append(heading);
+      if (result.status === 'fulfilled') {
+        heading.append(node('span', number.format(result.value.length), 'badge'));
+        if (result.value.length === 0) group.append(node('p', 'اتصال ذخیره‌شده‌ای وجود ندارد.', 'muted'));
+        for (const profile of result.value) {
+          group.append(button(profile.name, async () => {
+            try {
+              const connection = show(service);
+              location.hash = service;
+              await connection.openProfile(profile);
+              directory.close();
+              connection.panel.querySelector('[aria-pressed="true"]')?.focus();
+            } catch (error) {
+              report(directoryStatus, error.message, 'error');
+            }
+          }, 'directory-profile'));
+        }
+      } else {
+        group.append(node('p', result.reason.message, 'error'));
+      }
+      directoryList.append(group);
+    }
+    report(directoryStatus, '');
+  } finally {
+    directoryButton.disabled = false;
+  }
+});
 function selectService() {
   const service = location.hash.slice(1);
   show(Object.hasOwn(services, service) ? service : 'woo');

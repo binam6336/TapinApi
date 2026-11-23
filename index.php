@@ -108,7 +108,7 @@ try {
     $user = $env['DASHBOARD_USER'] ?? 'admin';
     $password = $env['DASHBOARD_PASSWORD'] ?? '';
     $logout = '';
-    if ($password !== '' && $path !== '/style.css') {
+    if ($password !== '' && !in_array($path, ['/style.css', '/favicon.svg'], true)) {
         if ($user === '' || strlen($password) < 12) {
             throw new AppError(500, 'برای فعال کردن ورود، نام کاربری و رمز حداقل ۱۲ کاراکتری تنظیم کنید.');
         }
@@ -118,6 +118,7 @@ try {
     $assets = [
         '/' => ['index.html', 'text/html'],
         '/app.js' => ['app.js', 'text/javascript'],
+        '/favicon.svg' => ['favicon.svg', 'image/svg+xml'],
         '/style.css' => ['style.css', 'text/css'],
         '/catalog.json' => ['catalog.json', 'application/json'],
     ];
@@ -131,7 +132,7 @@ try {
         }
         exit;
     }
-    if (preg_match('~^/api/(post|tipax|rail|woo)/(profiles|remove|run|details)$~D', $path, $parts)) {
+    if (preg_match('~^/api/(post|tipax|rail|woo)/(profiles|remove|run|details|drafts)$~D', $path, $parts)) {
         respond(200, api($env, $method, $parts[1], $parts[2]));
     }
     throw new AppError(404, 'صفحه پیدا نشد.');
