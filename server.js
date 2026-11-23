@@ -2,16 +2,15 @@ import { createServer } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup } from 'node:dns/promises';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
 import ipaddr from 'ipaddr.js';
+import { openDatabase } from './database.js';
 import { catalog } from './public/catalog.js';
 
-const { DATABASE_PATH, DATABASE_KEY, DASHBOARD_USER, DASHBOARD_PASSWORD } = process.env;
-if (!DATABASE_PATH || !/^[a-f\d]{64}$/i.test(DATABASE_KEY ?? '') || !DASHBOARD_USER ||
+const { DATABASE_KEY, DASHBOARD_USER, DASHBOARD_PASSWORD } = process.env;
+if (!/^[a-f\d]{64}$/i.test(DATABASE_KEY ?? '') || !DASHBOARD_USER ||
     DASHBOARD_USER.includes(':') || (DASHBOARD_PASSWORD?.length ?? 0) < 12) {
-  throw new Error('Set DATABASE_PATH, a 64-character hex DATABASE_KEY, DASHBOARD_USER and a DASHBOARD_PASSWORD of at least 12 characters in .env.');
+  throw new Error('Set a 64-character hex DATABASE_KEY, DASHBOARD_USER and a DASHBOARD_PASSWORD of at least 12 characters in .env.');
 }
 const port = Number(process.env.PORT ?? 3000);
 const baseUrl = new URL(process.env.BASE_URL ?? 'http://127.0.0.1:' + port + '/');
@@ -23,17 +22,7 @@ const basePath = baseUrl.pathname.replace(/\/+$/, '');
 baseUrl.pathname = basePath + '/';
 
 process.umask(0o077);
-const databasePath = resolve(DATABASE_PATH);
-mkdirSync(dirname(databasePath), { recursive: true });
-const db = new DatabaseSync(databasePath);
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA busy_timeout = 5000;
-  CREATE TABLE IF NOT EXISTS profiles (
-    id INTEGER PRIMARY KEY, service TEXT NOT NULL, name TEXT NOT NULL,
-    data TEXT NOT NULL, UNIQUE(service, name)
-  );
-`);
+const db = await openDatabase(process.env);
 const key = Buffer.from(DATABASE_KEY, 'hex');
 const digest = value => createHash('sha256').update(value).digest();
 const expectedAuth = digest(Buffer.from(DASHBOARD_USER + ':' + DASHBOARD_PASSWORD).toString('base64'));
@@ -69,14 +58,17 @@ function unseal(data) {
   cipher.setAuthTag(bytes.subarray(12, 28));
   return JSON.parse(Buffer.concat([cipher.update(bytes.subarray(28)), cipher.final()]));
 }
-function stored(service, id) {
-  if (!Number.isSafeInteger(id) || id <= 0) throw new AppError(400, 'شناسه اتصال نامعتبر است.');
-  const row = db.prepare('SELECT * FROM profiles WHERE service = ? AND id = ?').get(service, id);
+function profileId(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new AppError(400, 'شناسه اتصال نامعتبر است.');
+  return value;
+}
+async function stored(service, id) {
+  const [row] = await db.all('SELECT data FROM profiles WHERE service = ? AND id = ?', service, profileId(id));
   if (!row) throw new AppError(404, 'اتصال ذخیره‌شده پیدا نشد.');
   return row;
 }
-function connection(service, input) {
-  const values = input.profileId == null ? {} : unseal(stored(service, input.profileId).data);
+async function connection(service, input) {
+  const values = input.profileId == null ? {} : unseal((await stored(service, input.profileId)).data);
   for (const name of fields[service]) {
     const value = input.values?.[name];
     if (value === undefined) continue;
@@ -282,28 +274,37 @@ async function api(req, path) {
     throw new AppError(404, 'مسیر پیدا نشد.');
   }
   if (action === 'profiles' && req.method === 'GET') {
-    return db.prepare('SELECT id, name FROM profiles WHERE service = ? ORDER BY name').all(service);
+    return db.all('SELECT id, name FROM profiles WHERE service = ? ORDER BY name', service);
   }
   if (req.method !== 'POST') throw new AppError(405, 'روش درخواست نامعتبر است.');
   const input = await readInput(req);
   if (action === 'remove') {
-    const profile = stored(service, input.profileId);
-    db.prepare('DELETE FROM profiles WHERE id = ?').run(profile.id);
+    const id = profileId(input.profileId);
+    const result = await db.run('DELETE FROM profiles WHERE service = ? AND id = ?', service, id);
+    if (!result.changes) throw new AppError(404, 'اتصال ذخیره‌شده پیدا نشد.');
     return { ok: true };
   }
-  const values = connection(service, input);
+  const values = await connection(service, input);
   if (action === 'profiles') {
     const name = typeof input.name === 'string' ? input.name.trim() : '';
     if (!name || name.length > 80) throw new AppError(400, 'نام اتصال باید بین ۱ تا ۸۰ کاراکتر باشد.');
     if (service === 'woo') values.site = wooCredentials(values);
-    const duplicate = db.prepare('SELECT id FROM profiles WHERE service = ? AND name = ?').get(service, name);
-    if (duplicate && duplicate.id !== input.profileId) throw new AppError(409, 'این نام قبلاً استفاده شده است.');
-    if (input.profileId != null) {
-      db.prepare('UPDATE profiles SET name = ?, data = ? WHERE id = ?').run(name, seal(values), input.profileId);
-      return { id: input.profileId, name };
+    try {
+      const data = seal(values);
+      if (input.profileId != null) {
+        const result = await db.run('UPDATE profiles SET name = ?, data = ? WHERE service = ? AND id = ?',
+          name, data, service, input.profileId);
+        if (!result.changes) throw new AppError(404, 'اتصال ذخیره‌شده پیدا نشد.');
+        return { id: input.profileId, name };
+      }
+      const result = await db.run('INSERT INTO profiles (service, name, data) VALUES (?, ?, ?)', service, name, data);
+      return { id: result.id, name };
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY' || (error.code === 'ERR_SQLITE_ERROR' && error.errcode === 2067)) {
+        throw new AppError(409, 'این نام قبلاً استفاده شده است.');
+      }
+      throw error;
     }
-    const result = db.prepare('INSERT INTO profiles (service, name, data) VALUES (?, ?, ?)').run(service, name, seal(values));
-    return { id: Number(result.lastInsertRowid), name };
   }
   if (action === 'run') return service === 'woo' ? woo(values, input, false) : shipping(service, values, input);
   if (action === 'details' && service === 'woo') return woo(values, input, true);

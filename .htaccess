@@ -1,0 +1,4 @@
+# Send the project root and API paths to the Node application.
+DirectoryCheckHandler On
+RewriteEngine On
+RewriteRule ^ http://127.0.0.1:3000%{REQUEST_URI} [P,END]
