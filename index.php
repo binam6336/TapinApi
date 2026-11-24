@@ -135,7 +135,7 @@ try {
         }
         exit;
     }
-    if (preg_match('~^/api/(post|tipax|rail|woo)/(profiles|profile-order|remove|run|details|drafts|order-options|create-orders|create-status)$~D', $path, $parts)) {
+    if (preg_match('~^/api/(post|tipax|rail|woo)/(profiles|profile-order|remove|run|details|drafts|order-options|order-products|order-variations|create-orders|create-status)$~D', $path, $parts)) {
         respond(200, api($env, $method, $parts[1], $parts[2]));
     }
     throw new AppError(404, 'صفحه پیدا نشد.');

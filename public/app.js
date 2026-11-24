@@ -63,9 +63,12 @@ function facts(pairs) {
 }
 const timeoutKey = 'tapin-timeout:' + new URL('.', import.meta.url).pathname;
 let requestTimeout = 18;
+let configuredRequestTimeout;
 try {
   const saved = Number(localStorage.getItem(timeoutKey));
-  if (Number.isInteger(saved) && saved >= 1 && saved <= 60) requestTimeout = saved;
+  if (Number.isInteger(saved) && saved >= 1 && saved <= 60) {
+    configuredRequestTimeout = requestTimeout = saved;
+  }
 } catch {
   // Settings can still be used until the page closes when storage is unavailable.
 }
@@ -430,6 +433,75 @@ function orderRow(order) {
   return entry;
 }
 
+const wooFormLookupTimeout = () => configuredRequestTimeout ?? 60;
+
+function wooCatalogPicker(label, placeholder, onChange) {
+  const panel = node('div', '', 'woo-catalog-picker full');
+  const select = node('select');
+  select.required = true;
+  const feedback = status();
+  const more = button('محصولات بیشتر', () => void loadPage());
+  panel.append(field(label, select), feedback, more);
+  let state;
+
+  function render() {
+    select.disabled = !state || state.items.length === 0;
+    more.disabled = Boolean(state?.pending);
+    more.hidden = !state || (!state.hasMore && !state.failed);
+    more.textContent = state?.failed ? 'تلاش دوباره' : 'نمایش موارد بیشتر';
+  }
+  async function loadPage() {
+    const current = state;
+    if (!current || current.pending) return;
+    current.pending = true;
+    render();
+    report(feedback, 'در حال دریافت از ووکامرس…');
+    try {
+      const result = await sendTest('woo', current.action, {
+        ...current.target, ...current.params, page: current.page
+      }, wooFormLookupTimeout());
+      if (state !== current) return;
+      for (const item of result.items) {
+        if (current.items.some(existing => existing.id === item.id)) continue;
+        current.items.push(item);
+        select.add(new Option(
+          (item.name || 'بدون نام') + ' · قیمت: ' + (item.price || '—') + ' · وزن: ' + (item.weight || '—'),
+          String(item.id)
+        ));
+      }
+      current.page++;
+      current.hasMore = result.hasMore;
+      current.failed = false;
+      report(feedback, current.items.length ? '' : 'موردی در فروشگاه پیدا نشد.');
+    } catch (error) {
+      if (state !== current) return;
+      current.failed = true;
+      report(feedback, error.message, 'error');
+    } finally {
+      if (state === current) {
+        current.pending = false;
+        render();
+        onChange?.();
+      }
+    }
+  }
+
+  select.addEventListener('change', () => onChange?.());
+  return {
+    panel,
+    get selected() {
+      return state?.items.find(item => String(item.id) === select.value);
+    },
+    reset(target, action, params = {}) {
+      state = target ? { target, action, params, items: [], page: 1, hasMore: false, pending: false, failed: false } : null;
+      select.replaceChildren(new Option(placeholder, ''));
+      report(feedback, '');
+      render();
+      if (state) void loadPage();
+    }
+  };
+}
+
 function wooOrderForm(connection) {
   const dialog = node('dialog', '', 'woo-create');
   dialog.setAttribute('aria-label', 'افزودن سفارش');
@@ -441,17 +513,18 @@ function wooOrderForm(connection) {
   const results = node('ol', '', 'woo-create-results');
   const form = node('form');
   const fields = node('fieldset', '', 'woo-create-fields fields');
-  const integer = (initial, max, required = true) => {
+  const integer = (initial, max) => {
     const input = node('input');
-    Object.assign(input, { type: 'number', min: '1', max: String(max), step: '1', value: initial, required, dir: 'ltr' });
+    Object.assign(input, { type: 'number', min: '1', max: String(max), step: '1', defaultValue: initial, required: true, dir: 'ltr' });
     return input;
   };
   const count = integer('1', 20);
-  const product = integer('', 2147483647);
   const quantity = integer('1', 2147483647);
-  const variation = integer('', 2147483647, false);
-  fields.append(field('تعداد سفارش (حداکثر ۲۰)', count), field('شناسه محصول', product),
-    field('تعداد محصول در هر سفارش', quantity), field('شناسه تنوع (اختیاری)', variation));
+  const product = wooCatalogPicker('محصول', 'یک محصول انتخاب کنید', updateProduct);
+  const variation = wooCatalogPicker('تنوع محصول', 'یک تنوع انتخاب کنید', updateControls);
+  variation.panel.hidden = true;
+  fields.append(field('تعداد سفارش (حداکثر ۲۰)', count), field('تعداد محصول در هر سفارش', quantity),
+    product.panel, variation.panel);
   const billing = {};
   const billingFields = node('div', '', 'fields');
   for (const [key, label, type] of [
@@ -472,12 +545,16 @@ function wooOrderForm(connection) {
   fields.append(billingDetails);
   const select = node('select');
   select.required = true;
-  const load = button('انتخاب وضعیت از فروشگاه', () => void loadStatuses());
+  const statusFeedback = status();
+  const load = button('دریافت دوباره وضعیت‌ها', () => void loadStatuses());
+  load.hidden = true;
+  const statusField = node('div', '', 'full woo-status-field');
+  statusField.append(field('وضعیت سفارش', select), statusFeedback, load);
   const submit = node('button', 'ثبت سفارش‌ها', 'primary');
   submit.type = 'submit';
   const actions = node('div', '', 'actions');
-  actions.append(load, submit);
-  fields.append(field('وضعیت سفارش', select));
+  actions.append(submit);
+  fields.append(statusField);
   form.append(fields, actions);
   const custom = node('details');
   const customForm = node('form', '', 'fields');
@@ -496,6 +573,8 @@ function wooOrderForm(connection) {
   let host = '';
   let options = [];
   let busy = false;
+  let loadingStatuses = false;
+  let variationFor;
 
   function renderOptions(selected = '') {
     select.replaceChildren(new Option('یک وضعیت انتخاب کنید', ''), ...options.map(item =>
@@ -505,10 +584,21 @@ function wooOrderForm(connection) {
   }
   function updateControls() {
     fields.disabled = busy;
-    load.disabled = close.disabled = create.disabled = busy;
-    submit.disabled = busy || !select.value;
+    close.disabled = busy;
+    load.disabled = create.disabled = busy || loadingStatuses;
+    submit.disabled = busy || loadingStatuses || !select.value || !product.selected ||
+      (product.selected.hasVariations && !variation.selected);
     label.disabled = slug.disabled = busy;
-    select.disabled = busy || !options.length;
+    select.disabled = busy || loadingStatuses || !options.length;
+  }
+  function updateProduct() {
+    const id = product.selected?.hasVariations ? product.selected.id : null;
+    if (id !== variationFor) {
+      variationFor = id;
+      variation.panel.hidden = id === null;
+      variation.reset(id === null ? null : target, 'order-variations', { productId: id });
+    }
+    updateControls();
   }
   select.addEventListener('change', updateControls);
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
@@ -533,18 +623,35 @@ function wooOrderForm(connection) {
       updateControls();
     }
   }
-  function loadStatuses() {
-    return execute('order-options', {}, result => {
+  async function loadStatuses() {
+    if (busy || loadingStatuses) return;
+    const current = target;
+    loadingStatuses = true;
+    load.hidden = true;
+    updateControls();
+    report(statusFeedback, 'در حال دریافت وضعیت‌ها از فروشگاه…');
+    try {
+      const result = await sendTest('woo', 'order-options', current, wooFormLookupTimeout());
+      if (current !== target || !dialog.open) return;
       const selected = select.value;
       host = result.host;
       options = result.statuses;
       renderOptions(selected);
-      report(notice, 'وضعیت‌ها از ' + host + ' دریافت شدند.', 'ok');
-    });
+      report(statusFeedback, '');
+    } catch (error) {
+      if (current !== target || !dialog.open) return;
+      report(statusFeedback, error.message, 'error');
+      load.hidden = false;
+    } finally {
+      if (current === target) {
+        loadingStatuses = false;
+        updateControls();
+      }
+    }
   }
   customForm.addEventListener('submit', event => {
     event.preventDefault();
-    if (!customForm.reportValidity()) return;
+    if (loadingStatuses || !customForm.reportValidity()) return;
     void execute('create-status', { name: label.value.trim(), slug: slug.value.trim() }, result => {
       host = result.host ?? host;
       options = options.filter(item => item.slug !== result.slug);
@@ -557,14 +664,14 @@ function wooOrderForm(connection) {
   });
   form.addEventListener('submit', event => {
     event.preventDefault();
-    if (busy || !form.reportValidity() || !select.value) return;
+    if (submit.disabled || !form.reportValidity()) return;
     const total = count.valueAsNumber;
     if (!window.confirm('ثبت ' + number.format(total) + ' سفارش با وضعیت «' +
         select.selectedOptions[0].text + '»' + (host ? ' در ' + host : '') + ' تأیید می‌شود؟')) return;
     results.replaceChildren();
     void execute('create-orders', {
-      count: total, productId: product.valueAsNumber, quantity: quantity.valueAsNumber,
-      variationId: variation.value ? variation.valueAsNumber : null, status: select.value,
+      count: total, productId: product.selected.id, quantity: quantity.valueAsNumber,
+      variationId: variation.selected?.id ?? null, status: select.value,
       billing: Object.fromEntries(Object.entries(billing).map(([key, input]) => [key, input.value]))
     }, result => {
       const added = result.orders.filter(order => order.id).length;
@@ -583,7 +690,12 @@ function wooOrderForm(connection) {
     target = connection.payload();
     options = [];
     host = '';
+    loadingStatuses = false;
+    variationFor = null;
     form.reset();
+    variation.reset(null);
+    variation.panel.hidden = true;
+    product.reset(target, 'order-products');
     customForm.reset();
     custom.open = false;
     results.replaceChildren();
@@ -591,6 +703,7 @@ function wooOrderForm(connection) {
     timing.clear();
     renderOptions();
     dialog.showModal();
+    void loadStatuses();
   });
   return { dialog, open };
 }
@@ -1164,7 +1277,7 @@ saveSettings.type = 'submit';
 settingsForm.append(field('زمان انتظار پاسخ (ثانیه)', timeoutInput), saveSettings);
 settingsForm.addEventListener('submit', event => {
   event.preventDefault();
-  requestTimeout = timeoutInput.valueAsNumber;
+  configuredRequestTimeout = requestTimeout = timeoutInput.valueAsNumber;
   try { localStorage.setItem(timeoutKey, String(requestTimeout)); }
   catch { /* The setting remains available for this page. */ }
   settings.close();

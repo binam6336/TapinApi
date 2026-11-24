@@ -193,7 +193,9 @@ function api(array $env, string $method, string $service, string $action): mixed
         return orderedProfiles(database($env), $service);
     }
     if ($method !== 'POST') throw new AppError(405, 'روش درخواست نامعتبر است.');
-    $wooOnly = ['details', 'order-options', 'create-orders', 'create-status'];
+    $wooReads = ['order-options', 'order-products', 'order-variations'];
+    $wooWrites = ['create-orders', 'create-status'];
+    $wooOnly = array_merge(['details'], $wooReads, $wooWrites);
     if (in_array($action, $wooOnly, true) && $service !== 'woo') throw new AppError(404, 'مسیر پیدا نشد.');
     $input = readInput();
     if ($action === 'profile-order') return saveProfileOrder(database($env), $service, $input->ids ?? null);
@@ -245,12 +247,12 @@ function api(array $env, string $method, string $service, string $action): mixed
         }
         return ['id' => $id, 'name' => $name];
     }
-    $timeout = $input->timeout ?? 18;
+    $timeout = $input->timeout ?? (in_array($action, $wooReads, true) ? 60 : 18);
     if (!is_int($timeout) || $timeout < 1 || $timeout > 60) {
         throw new AppError(400, 'زمان انتظار باید یک عدد صحیح بین ۱ و ۶۰ ثانیه باشد.');
     }
-    if (in_array($action, ['order-options', 'create-orders', 'create-status'], true)) {
-        if ($action !== 'order-options' && $id !== null && ($env['DASHBOARD_PASSWORD'] ?? '') === '' &&
+    if (in_array($action, $wooReads, true) || in_array($action, $wooWrites, true)) {
+        if (in_array($action, $wooWrites, true) && $id !== null && ($env['DASHBOARD_PASSWORD'] ?? '') === '' &&
             (empty($input->values->key) || empty($input->values->secret))) {
             throw new AppError(403, 'برای ثبت در اتصال ذخیره‌شده، کلید و رمز ووکامرس را وارد کنید یا ورود داشبورد را فعال کنید.');
         }
@@ -452,6 +454,50 @@ function wooOrderInteger(mixed $value, string $label, int $max = 2147483647): in
     return $value;
 }
 
+function wooOrderProducts(string $root, string $auth, int $deadline, object $input, bool $variations): array {
+    $page = wooOrderInteger($input->page ?? 1, 'شماره صفحه');
+    $pageSize = 30;
+    $path = '/products';
+    if ($variations) {
+        $productId = wooOrderInteger($input->productId ?? null, 'شناسه محصول');
+        $path .= '/' . $productId . '/variations';
+    }
+    $fields = $variations ? 'id,name,price,weight,attributes' : 'id,name,price,weight,type,variations';
+    $query = http_build_query(['per_page' => $pageSize, 'page' => $page, '_fields' => $fields]);
+    $response = upstream($root . $path . '?' . $query, $deadline, auth: $auth);
+    $data = json_decode($response['body'], false);
+    if ($page > 1 && $response['status'] === 400 &&
+        in_array($data->code ?? null, ['rest_post_invalid_page_number', 'woocommerce_rest_invalid_page_number'], true)) {
+        return ['items' => [], 'hasMore' => false];
+    }
+    if ($response['status'] === 401 || $response['status'] === 403) {
+        throw new AppError(403, 'کلید ووکامرس مجوز خواندن محصولات را ندارد.');
+    }
+    if ($response['status'] !== 200 || !is_array($data)) {
+        throw new AppError(502, 'فهرست محصولات از ووکامرس دریافت نشد. HTTP ' . $response['status']);
+    }
+    $items = [];
+    foreach ($data as $entry) {
+        if (!is_int($entry->id ?? null) || $entry->id < 1) continue;
+        $name = trim((string) ($entry->name ?? ''));
+        if ($variations && is_array($entry->attributes ?? null)) {
+            $attributes = [];
+            foreach ($entry->attributes as $attribute) {
+                if (!empty($attribute->option)) $attributes[] = $attribute->option;
+            }
+            if ($attributes) $name = implode(' / ', $attributes);
+        }
+        $items[] = [
+            'id' => $entry->id,
+            'name' => $name,
+            'price' => (string) ($entry->price ?? ''),
+            'weight' => (string) ($entry->weight ?? ''),
+            'hasVariations' => !$variations && (($entry->type ?? '') === 'variable' || !empty($entry->variations)),
+        ];
+    }
+    return ['items' => $items, 'hasMore' => count($data) === $pageSize];
+}
+
 function wooOrderAction(array $values, object $input, string $action, int $timeout): array {
     $site = wooCredentials($values);
     $root = $site . '/wp-json/wc/v3';
@@ -459,6 +505,9 @@ function wooOrderAction(array $values, object $input, string $action, int $timeo
     $deadline = hrtime(true) + $timeout * 1_000_000_000;
     $host = parse_url($site, PHP_URL_HOST);
     if ($action === 'order-options') return ['host' => $host, 'statuses' => wooOrderStatuses($root, $auth, $deadline)];
+    if ($action === 'order-products' || $action === 'order-variations') {
+        return wooOrderProducts($root, $auth, $deadline, $input, $action === 'order-variations');
+    }
 
     if ($action === 'create-status') {
         $slug = is_string($input->slug ?? null) ? trim($input->slug) : '';
