@@ -147,6 +147,89 @@ function requestTelemetry() {
   };
 }
 
+function sortableProfiles(choices, move) {
+  let drag;
+  let highlighted;
+
+  function highlight(target) {
+    highlighted?.classList.remove('profile-drop-target');
+    highlighted = target;
+    highlighted?.classList.add('profile-drop-target');
+  }
+  function stop() {
+    drag?.card.classList.remove('profile-dragging');
+    highlight(null);
+    drag = undefined;
+  }
+  function targetAt(element) {
+    const target = element?.closest('[data-profile-id]');
+    return target && choices.contains(target) && target !== drag?.card ? target : null;
+  }
+  function commit(target, focus = false) {
+    const source = drag?.card;
+    stop();
+    if (source && target) void move(Number(source.dataset.profileId), Number(target.dataset.profileId), focus);
+  }
+
+  choices.addEventListener('dragover', event => {
+    if (!drag || drag.pointer != null) return;
+    const target = targetAt(event.target);
+    if (target) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    }
+    highlight(target);
+  });
+  choices.addEventListener('drop', event => {
+    if (!drag || drag.pointer != null) return;
+    event.preventDefault();
+    commit(targetAt(event.target));
+  });
+
+  return function sortable(card, handle, id) {
+    card.draggable = true;
+    card.addEventListener('dragstart', event => {
+      if (drag || handle.disabled || handle.matches(':disabled')) {
+        event.preventDefault();
+        return;
+      }
+      drag = { card };
+      event.dataTransfer.setData('text/plain', String(id));
+      event.dataTransfer.effectAllowed = 'move';
+      card.classList.add('profile-dragging');
+    });
+    card.addEventListener('dragend', stop);
+
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || !event.isPrimary || drag) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      drag = { card, pointer: event.pointerId };
+      card.classList.add('profile-dragging');
+    });
+    handle.addEventListener('pointermove', event => {
+      if (drag?.pointer !== event.pointerId) return;
+      highlight(targetAt(document.elementFromPoint(event.clientX, event.clientY)));
+    });
+    handle.addEventListener('pointerup', event => {
+      if (drag?.pointer !== event.pointerId) return;
+      commit(targetAt(document.elementFromPoint(event.clientX, event.clientY)));
+    });
+    handle.addEventListener('lostpointercapture', event => {
+      if (drag?.pointer === event.pointerId) stop();
+    });
+
+    handle.addEventListener('keydown', event => {
+      const directions = { ArrowUp: -1, ArrowRight: -1, ArrowDown: 1, ArrowLeft: 1 };
+      const delta = directions[event.key];
+      if (!delta) return;
+      event.preventDefault();
+      const target = delta < 0 ? card.previousElementSibling : card.nextElementSibling;
+      if (target?.dataset.profileId) void move(id, Number(target.dataset.profileId), true);
+    });
+  };
+}
+
 function connectionPanel(service, onChange) {
   const config = services[service];
   const panel = node('section', '', 'panel');
@@ -193,17 +276,67 @@ function connectionPanel(service, onChange) {
       ? 'برای استفاده از مقدار ذخیره‌شده، فیلد مربوط را خالی بگذارید.'
       : 'برای تست فوری، فیلدهای اتصال را پر کنید. ذخیره اختیاری است.';
   }
+  let savingOrder = false;
+  const sortable = sortableProfiles(choices, moveProfile);
+
   function renderProfiles() {
     profileCount.textContent = number.format(profiles.length);
-    const options = [{ id: null, name: 'اتصال جدید' }, ...profiles];
-    choices.replaceChildren(...options.map(profile => {
-      const card = button('', () => select(profile.id), 'profile-choice');
+    const options = [...profiles, { id: null, name: 'اتصال جدید' }];
+    choices.replaceChildren(...options.map((profile, index) => {
+      const choice = button('', () => select(profile.id), 'profile-choice');
       const icon = serviceIcon(profile.id == null ? { icon: '+' } : config, 'profile-choice-icon');
-      card.append(icon, node('span', profile.name));
-      card.setAttribute('aria-pressed', String(selectedId === profile.id));
+      const label = node('span', profile.name);
+      choice.append(icon, label);
+      choice.setAttribute('aria-pressed', String(selectedId === profile.id));
+      if (profile.id == null) return choice;
+
+      const card = node('div', '', 'profile-card');
+      card.dataset.profileId = String(profile.id);
+      if (index === 0) {
+        const badge = node('small', 'پیش‌فرض', 'profile-default');
+        badge.setAttribute('aria-hidden', 'true');
+        label.append(badge);
+        choice.setAttribute('aria-description', 'اتصال پیش‌فرض');
+      }
+      card.append(choice);
+      if (profiles.length > 1) {
+        const handle = node('button', '⠿', 'profile-grip');
+        handle.type = 'button';
+        handle.setAttribute('aria-label', 'جابه‌جایی ' + profile.name);
+        handle.setAttribute('aria-description', 'برای تغییر ترتیب بکشید یا از کلیدهای جهت استفاده کنید.');
+        handle.title = 'برای جابه‌جایی بکشید';
+        card.append(handle);
+        sortable(card, handle, profile.id);
+      }
       return card;
     }));
     updateHelp();
+  }
+
+  async function moveProfile(source, target, focus) {
+    if (savingOrder || picker.disabled || source === target) return;
+    const from = profiles.findIndex(profile => profile.id === source);
+    const to = profiles.findIndex(profile => profile.id === target);
+    if (from < 0 || to < 0) return;
+    const previous = profiles;
+    const ordered = [...profiles];
+    ordered.splice(to, 0, ordered.splice(from, 1)[0]);
+    savingOrder = true;
+    await busy(async () => {
+      profiles = ordered;
+      renderProfiles();
+      try {
+        profiles = await api(service, 'profile-order', { ids: ordered.map(profile => profile.id) });
+        report(message, 'ترتیب اتصال‌ها ذخیره شد.', 'ok');
+      } catch (error) {
+        profiles = previous;
+        throw error;
+      } finally {
+        renderProfiles();
+      }
+    });
+    savingOrder = false;
+    if (focus) choices.querySelector('[data-profile-id="' + source + '"] .profile-grip')?.focus();
   }
   function select(id) {
     if (picker.disabled) return;
@@ -218,9 +351,10 @@ function connectionPanel(service, onChange) {
     choices.querySelector('[aria-pressed="true"]')?.focus();
     onChange();
   }
-  async function refresh(selected = null) {
+  async function refresh(selected) {
     profiles = await api(service, 'profiles');
-    selectedId = selected;
+    selectedId = selected === undefined ? (profiles[0]?.id ?? null) : selected;
+    name.value = profiles.find(item => item.id === selectedId)?.name ?? '';
     renderProfiles();
   }
   async function busy(operation) {
@@ -248,7 +382,6 @@ function connectionPanel(service, onChange) {
     void busy(async () => {
       await api(service, 'remove', { profileId: profileId() });
       await refresh();
-      name.value = '';
       for (const input of Object.values(inputs)) input.value = '';
       onChange();
       report(message, 'اتصال حذف شد.', 'ok');
@@ -261,7 +394,10 @@ function connectionPanel(service, onChange) {
   panel.append(form);
   renderProfiles();
   picker.disabled = true;
-  const ready = refresh().catch(error => report(message, error.message, 'error')).finally(() => { picker.disabled = false; });
+  const ready = refresh()
+    .then(() => onChange())
+    .catch(error => report(message, error.message, 'error'))
+    .finally(() => { picker.disabled = false; });
   return {
     panel, form, fields, inputs, actions, payload, busy,
     async openProfile(profile) {

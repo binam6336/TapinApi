@@ -141,6 +141,47 @@ function requestDrafts(array $env, string $method, string $service, string $key)
     return ['ok' => true];
 }
 
+function profileOrderTable(PDO $db): void {
+    if ($db->query("SHOW TABLES LIKE 'profile\_order'")->fetchColumn() !== false) return;
+    $db->exec('CREATE TABLE IF NOT EXISTS profile_order (
+        service VARCHAR(16) NOT NULL PRIMARY KEY,
+        profile_ids LONGTEXT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin');
+}
+
+function orderedProfiles(PDO $db, string $service): array {
+    profileOrderTable($db);
+    $rows = query($db, 'SELECT id, name FROM profiles WHERE service = ? ORDER BY id', [$service])->fetchAll();
+    $saved = query($db, 'SELECT profile_ids FROM profile_order WHERE service = ?', [$service])->fetchColumn();
+    if ($saved === false) return $rows;
+
+    $remaining = array_column($rows, null, 'id');
+    $ordered = [];
+    foreach (json_decode($saved, true, 512, JSON_THROW_ON_ERROR) as $id) {
+        if (!isset($remaining[$id])) continue;
+        $ordered[] = $remaining[$id];
+        unset($remaining[$id]);
+    }
+    return array_merge($ordered, array_values($remaining));
+}
+
+function saveProfileOrder(PDO $db, string $service, mixed $ids): array {
+    if (!is_array($ids) || !array_is_list($ids) ||
+        array_filter($ids, static fn($id) => !is_int($id) || $id <= 0) ||
+        count(array_unique($ids, SORT_NUMERIC)) !== count($ids)) {
+        throw new AppError(400, 'ترتیب اتصال‌ها نامعتبر است.');
+    }
+    $rows = orderedProfiles($db, $service);
+    $byId = array_column($rows, null, 'id');
+    if (count($ids) !== count($rows) || array_diff($ids, array_keys($byId))) {
+        throw new AppError(409, 'فهرست اتصال‌ها تغییر کرده است. صفحه را تازه کنید و دوباره تلاش کنید.');
+    }
+    $encoded = json_encode($ids, JSON_THROW_ON_ERROR);
+    query($db, 'INSERT INTO profile_order (service, profile_ids) VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE profile_ids = ?', [$service, $encoded, $encoded]);
+    return array_map(static fn(int $id) => $byId[$id], $ids);
+}
+
 function api(array $env, string $method, string $service, string $action): mixed {
     $hexKey = $env['DATABASE_KEY'] ?? '';
     if (!preg_match('/^[0-9a-f]{64}$/iD', $hexKey)) {
@@ -149,12 +190,13 @@ function api(array $env, string $method, string $service, string $action): mixed
     $key = hex2bin($hexKey);
     if ($action === 'drafts') return requestDrafts($env, $method, $service, $key);
     if ($action === 'profiles' && $method === 'GET') {
-        return query(database($env), 'SELECT id, name FROM profiles WHERE service = ? ORDER BY name', [$service])->fetchAll();
+        return orderedProfiles(database($env), $service);
     }
     if ($method !== 'POST') throw new AppError(405, 'روش درخواست نامعتبر است.');
     $wooOnly = ['details', 'order-options', 'create-orders', 'create-status'];
     if (in_array($action, $wooOnly, true) && $service !== 'woo') throw new AppError(404, 'مسیر پیدا نشد.');
     $input = readInput();
+    if ($action === 'profile-order') return saveProfileOrder(database($env), $service, $input->ids ?? null);
     $id = $input->profileId ?? null;
     if (($id !== null || $action === 'remove') && (!is_int($id) || $id <= 0)) {
         throw new AppError(400, 'شناسه اتصال نامعتبر است.');
