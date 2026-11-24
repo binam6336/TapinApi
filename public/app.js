@@ -266,6 +266,10 @@ function connectionPanel(service, onChange) {
   const help = node('p', '', 'status muted');
   const message = status();
   const actions = node('div', '', 'actions');
+  const editor = node('div', '', 'connection-editor');
+  editor.id = 'connection-editor-' + service;
+  editor.hidden = true;
+  let originalValues;
   fields.append(field('نام اتصال برای ذخیره', name));
   const profileId = () => selectedId;
   const payload = () => ({
@@ -273,7 +277,7 @@ function connectionPanel(service, onChange) {
     values: Object.fromEntries(Object.entries(inputs).filter(([, input]) => input.value.trim()).map(([key, input]) => [key, input.value.trim()]))
   });
   function updateHelp() {
-    remove.hidden = !profileId();
+    remove.hidden = edit.hidden = !profileId();
     save.textContent = profileId() ? 'به‌روزرسانی اتصال' : 'ذخیره اتصال';
     help.textContent = profileId()
       ? 'برای استفاده از مقدار ذخیره‌شده، فیلد مربوط را خالی بگذارید.'
@@ -284,14 +288,22 @@ function connectionPanel(service, onChange) {
 
   function renderProfiles() {
     profileCount.textContent = number.format(profiles.length);
-    const options = [...profiles, { id: null, name: 'اتصال جدید' }];
+    const options = [...profiles, { id: null, name: 'افزودن اتصال' }];
     choices.replaceChildren(...options.map((profile, index) => {
-      const choice = button('', () => select(profile.id), 'profile-choice');
+      const choice = button('', () => {
+        select(profile.id);
+        if (profile.id == null) openEditor();
+      }, 'profile-choice');
       const icon = serviceIcon(profile.id == null ? { icon: '+' } : config, 'profile-choice-icon');
       const label = node('span', profile.name);
       choice.append(icon, label);
       choice.setAttribute('aria-pressed', String(selectedId === profile.id));
-      if (profile.id == null) return choice;
+      if (profile.id == null) {
+        choice.dataset.addConnection = '';
+        choice.setAttribute('aria-controls', editor.id);
+        choice.setAttribute('aria-expanded', String(selectedId === null && !editor.hidden));
+        return choice;
+      }
 
       const card = node('div', '', 'profile-card');
       card.dataset.profileId = String(profile.id);
@@ -341,12 +353,26 @@ function connectionPanel(service, onChange) {
     savingOrder = false;
     if (focus) choices.querySelector('[data-profile-id="' + source + '"] .profile-grip')?.focus();
   }
+  function setEditorOpen(open) {
+    editor.hidden = !open;
+    if (!open) originalValues = undefined;
+    edit.setAttribute('aria-expanded', String(open && selectedId !== null));
+    choices.querySelector('[data-add-connection]')?.setAttribute('aria-expanded', String(open && selectedId === null));
+  }
+  function openEditor() {
+    if (editor.hidden) {
+      originalValues = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value]));
+    }
+    setEditorOpen(true);
+    (inputs[config.fields[0]] ?? name).focus();
+  }
   function select(id) {
     if (picker.disabled) return;
     const profile = profiles.find(item => item.id === id);
     if (id != null && !profile) return;
     if (id === selectedId) return;
     selectedId = id;
+    setEditorOpen(false);
     for (const input of Object.values(inputs)) input.value = '';
     name.value = profile?.name ?? '';
     report(message, '');
@@ -369,6 +395,19 @@ function connectionPanel(service, onChange) {
     catch (error) { report(message, error.message, 'error'); }
     finally { for (const control of enabled) control.disabled = false; }
   }
+  const edit = button('ویرایش اتصال', openEditor);
+  edit.setAttribute('aria-controls', editor.id);
+  edit.setAttribute('aria-expanded', 'false');
+  const cancel = button('انصراف', () => {
+    if (originalValues) {
+      for (const [key, value] of Object.entries(originalValues)) inputs[key].value = value;
+    }
+    name.value = profiles.find(item => item.id === selectedId)?.name ?? '';
+    setEditorOpen(false);
+    report(message, '');
+    (selectedId === null ? choices.querySelector('[data-add-connection]') : edit)?.focus();
+    onChange();
+  });
   const save = button('ذخیره اتصال', () => {
     if (inputs.site && !inputs.site.reportValidity()) return;
     void busy(async () => {
@@ -376,6 +415,7 @@ function connectionPanel(service, onChange) {
       await refresh(saved.id);
       name.value = saved.name;
       for (const input of Object.values(inputs)) input.value = '';
+      setEditorOpen(false);
       onChange();
       report(message, 'اتصال ذخیره شد.', 'ok');
     });
@@ -386,14 +426,18 @@ function connectionPanel(service, onChange) {
       await api(service, 'remove', { profileId: profileId() });
       await refresh();
       for (const input of Object.values(inputs)) input.value = '';
+      setEditorOpen(false);
       onChange();
       report(message, 'اتصال حذف شد.', 'ok');
     });
   }, 'danger');
   for (const input of Object.values(inputs)) input.addEventListener('input', onChange);
   form.addEventListener('submit', event => event.preventDefault());
-  actions.append(save, remove);
-  form.append(heading, picker, help, fields, actions, message);
+  const editorActions = node('div', '', 'actions');
+  editorActions.append(save, cancel, remove);
+  editor.append(help, fields, editorActions);
+  actions.append(edit);
+  form.append(heading, picker, actions, editor, message);
   panel.append(form);
   renderProfiles();
   picker.disabled = true;
@@ -402,7 +446,7 @@ function connectionPanel(service, onChange) {
     .catch(error => report(message, error.message, 'error'))
     .finally(() => { picker.disabled = false; });
   return {
-    panel, form, fields, inputs, actions, payload, busy,
+    panel, form, inputs, actions, payload, busy,
     async openProfile(profile) {
       await ready;
       if (!profiles.some(item => item.id === profile.id)) await refresh(selectedId);
@@ -783,7 +827,6 @@ function wooView(view) {
   const limit = node('input');
   Object.assign(limit, { type: 'number', min: '1', max: '100', value: '10', required: true, dir: 'ltr' });
   limit.addEventListener('input', reset);
-  connection.fields.append(field('تعداد سفارش', limit));
   const run = button('تست و دریافت سفارش‌ها', () => {
     if (!connection.form.reportValidity()) return;
     const input = { ...connection.payload(), limit: limit.value };
@@ -816,7 +859,9 @@ function wooView(view) {
   }, 'primary');
   const orderCreation = wooOrderForm(connection);
   orderHead.append(orderCreation.open);
-  connection.actions.prepend(run);
+  const limitField = field('تعداد سفارش', limit);
+  limitField.className = 'connection-test-limit';
+  connection.actions.prepend(limitField, run);
   connection.form.addEventListener('submit', () => run.click());
   view.append(connection.panel, scopePanel, orderPanel, dialog, orderCreation.dialog);
   return connection;

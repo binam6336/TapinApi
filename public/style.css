@@ -139,7 +139,6 @@ dialog::backdrop { background: #070911b8; }
   background: color-mix(in srgb, var(--accent) 13%, var(--input));
   font: bold 16px monospace;
 }
-.profile-picker + .status { margin-block: 9px 13px; }
 .connection-directory { width: min(650px, calc(100% - 30px)); max-height: 85vh; }
 .connection-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr)); gap: 12px; margin-top: 16px; }
 .connection-group { min-width: 0; border: 1px solid var(--border); border-inline-start: 3px solid var(--connection-color); border-radius: 12px; padding: 12px; }
@@ -222,3 +221,7 @@ dialog::backdrop { background: #070911b8; }
 .profile-default { display: block; color: var(--muted); font-size: 10px; line-height: 1.4; }
 
 .woo-catalog-picker > button, .woo-status-field > button { margin-top: 7px; }
+
+.connection-editor { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.connection-editor .status { margin: 0 0 12px; }
+.connection-test-limit { width: 100px; }
