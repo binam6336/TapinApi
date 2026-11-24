@@ -61,13 +61,90 @@ function facts(pairs) {
   }
   return list;
 }
-async function api(service, action, input) {
+const timeoutKey = 'tapin-timeout:' + new URL('.', import.meta.url).pathname;
+let requestTimeout = 18;
+try {
+  const saved = Number(localStorage.getItem(timeoutKey));
+  if (Number.isInteger(saved) && saved >= 1 && saved <= 60) requestTimeout = saved;
+} catch {
+  // Settings can still be used until the page closes when storage is unavailable.
+}
+
+async function api(service, action, input, signal) {
   const response = await fetch(new URL('./api/' + service + '/' + action, import.meta.url), input == null ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input)
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal
   });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error ?? 'درخواست ناموفق بود.');
+  let result;
+  try {
+    result = await response.json();
+  } catch (error) {
+    if (response.ok || error.name === 'TimeoutError' || error.name === 'AbortError') throw error;
+  }
+  if (!response.ok) {
+    const error = new Error(result?.error ?? 'درخواست ناموفق بود. HTTP ' + response.status);
+    error.status = response.status;
+    throw error;
+  }
   return result;
+}
+
+async function sendTest(service, action, input, timeout) {
+  // Allow the server time to return its timeout response and any partial results.
+  const signal = AbortSignal.timeout((timeout + 2) * 1000);
+  try {
+    return await api(service, action, { ...input, timeout }, signal);
+  } catch (error) {
+    if (signal.aborted) {
+      const timeoutError = new Error('زمان پاسخ سرویس تمام شد.');
+      timeoutError.status = 504;
+      throw timeoutError;
+    }
+    throw error;
+  }
+}
+
+function requestTelemetry() {
+  const element = node('span', '', 'request-telemetry');
+  const state = node('span', '', 'request-state');
+  state.role = 'status';
+  const timing = node('span', '', 'request-time');
+  const track = node('span', '', 'request-track');
+  track.setAttribute('aria-hidden', 'true');
+  timing.title = 'زمان پاسخ درخواست HTTP';
+  element.append(state, timing, track);
+  element.hidden = true;
+  let started;
+  let timer;
+
+  return {
+    element,
+    start(timeout) {
+      clearInterval(timer);
+      started = performance.now();
+      element.hidden = false;
+      element.dataset.state = 'pending';
+      state.textContent = 'در حال ارسال';
+      const seconds = new Intl.NumberFormat('fa-IR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      const tick = () => {
+        timing.textContent = seconds.format((performance.now() - started) / 1000) + ' / ' + number.format(timeout) + ' ث';
+      };
+      tick();
+      timer = setInterval(tick, 100);
+    },
+    finish(label, kind, ms = performance.now() - started) {
+      clearInterval(timer);
+      element.dataset.state = kind;
+      state.textContent = label;
+      timing.textContent = number.format(Math.round(ms)) + ' میلی‌ثانیه';
+    },
+    fail(error) {
+      this.finish(error.status === 504 ? 'پایان زمان انتظار' : 'خطا', 'error');
+    },
+    clear() {
+      clearInterval(timer);
+      element.hidden = true;
+    }
+  };
 }
 
 function connectionPanel(service, onChange) {
@@ -234,13 +311,14 @@ function wooView(view) {
   const dialog = node('dialog');
   dialog.setAttribute('aria-label', 'جزئیات فروشگاه');
   const detailsStatus = status();
+  const detailsTiming = requestTelemetry();
   const detailFacts = node('div');
   const detailsResponse = responseViewer('پاسخ جزئیات فروشگاه (JSON)');
   detailsResponse.panel.hidden = true;
   const close = button('بستن', () => dialog.close());
   const dialogHead = node('div', '', 'topline');
   dialogHead.append(node('h2', 'جزئیات فروشگاه'), close);
-  dialog.append(dialogHead, detailsStatus, detailFacts, detailsResponse.panel);
+  dialog.append(dialogHead, detailsTiming.element, detailsStatus, detailFacts, detailsResponse.panel);
   let successfulInput;
   const details = button('جزئیات بیشتر', async () => {
     if (!successfulInput) return;
@@ -250,8 +328,11 @@ function wooView(view) {
     detailsResponse.panel.hidden = true;
     report(detailsStatus, 'در حال دریافت…');
     dialog.showModal();
+    const timeout = requestTimeout;
+    detailsTiming.start(timeout);
     try {
-      const values = await api('woo', 'details', successfulInput);
+      const values = await sendTest('woo', 'details', successfulInput, timeout);
+      detailsTiming.finish('پاسخ دریافت شد', 'ok');
       detailsResponse.update(JSON.stringify(values, null, 2));
       detailsResponse.panel.hidden = false;
       report(detailsStatus, '');
@@ -263,16 +344,20 @@ function wooView(view) {
           : values.wp_memory_limit],
         ['HTTPS فروشگاه', values.https == null ? null : values.https ? 'فعال' : 'غیرفعال']
       ]));
-    } catch (error) { report(detailsStatus, error.message, 'error'); }
-    finally { details.disabled = false; }
+    } catch (error) {
+      detailsTiming.fail(error);
+      report(detailsStatus, error.message, 'error');
+    } finally { details.disabled = false; }
   });
   details.hidden = true;
-  scopePanel.append(node('h2', 'نوع کلید'), scope, note, node('div', '', 'actions'));
+  const ordersTiming = requestTelemetry();
+  scopePanel.append(node('h2', 'نوع کلید'), scope, note, ordersTiming.element, node('div', '', 'actions'));
   scopePanel.lastChild.append(details);
   function reset() {
     successfulInput = undefined;
     details.hidden = true;
     scope.textContent = 'بررسی نشده';
+    ordersTiming.clear();
     report(note, 'نتیجه بررسی دسترسی اینجا نمایش داده می‌شود.');
     count.textContent = '—';
     report(orderStatus, idle);
@@ -291,8 +376,11 @@ function wooView(view) {
     void connection.busy(async () => {
       reset();
       report(orderStatus, 'در حال دریافت سفارش‌ها…');
+      const timeout = requestTimeout;
+      ordersTiming.start(timeout);
       try {
-        const result = await api('woo', 'run', input);
+        const result = await sendTest('woo', 'run', input, timeout);
+        ordersTiming.finish('پاسخ دریافت شد', 'ok');
         scope.textContent = { write: 'خواندن / نوشتن', read: 'فقط خواندن', unknown: 'نامشخص' }[result.scope];
         report(note, result.scope === 'unknown'
           ? 'خواندن تأیید شد. پاسخ فروشگاه برای تشخیص دسترسی نوشتن کافی نبود.'
@@ -305,6 +393,7 @@ function wooView(view) {
         successfulInput = input;
         details.hidden = false;
       } catch (error) {
+        ordersTiming.fail(error);
         scope.textContent = 'نامشخص';
         report(note, 'دسترسی خواندن تأیید نشد.');
         report(orderStatus, error.message, 'error');
@@ -509,30 +598,29 @@ function shippingView(service, view) {
   tools.append(node('h2', 'ابزار تست'), field('جستجوی مسیر', search), node('div', '', 'actions'), queueStatus);
   tools.querySelector('.actions').append(runSafe);
 
-  async function locked(operation) {
-    if (running) return;
-    running = true;
-    runSafe.disabled = true;
-    for (const { sendButton } of cards) sendButton.disabled = true;
-    try { await connection.busy(operation); }
-    finally {
-      running = false;
-      runSafe.disabled = false;
-      for (const { sendButton } of cards) sendButton.disabled = false;
-    }
-  }
   async function runQueue() {
     if (running) return;
     const queue = cards.filter(card => !card.endpoint.danger && !card.entry.hidden);
     if (!queue.length) return;
-    await locked(async () => {
-      let successful = 0;
+    running = true;
+    runSafe.disabled = true;
+    const context = connection.payload();
+    const timeout = requestTimeout;
+    let successful = 0;
+    let skipped = 0;
+    try {
       for (const [index, card] of queue.entries()) {
         report(queueStatus, number.format(index + 1) + ' / ' + number.format(queue.length) + ' · ' + card.endpoint.title);
-        if (await card.send()) successful++;
+        const result = await card.send(context, timeout);
+        if (result === null) skipped++;
+        else if (result) successful++;
       }
-      report(queueStatus, number.format(successful) + ' پاسخ موفق از ' + number.format(queue.length) + ' مسیر');
-    });
+      const summary = number.format(successful) + ' پاسخ موفق از ' + number.format(queue.length) + ' مسیر';
+      report(queueStatus, skipped ? summary + ' · ' + number.format(skipped) + ' مسیر در حال ارسال بود' : summary);
+    } finally {
+      running = false;
+      runSafe.disabled = false;
+    }
   }
   let group;
   for (const endpoint of endpoints) {
@@ -546,8 +634,8 @@ function shippingView(service, view) {
     title.append(node('span', endpoint.method, 'method'), node('strong', endpoint.title));
     if (endpoint.danger) title.append(node('small', 'تغییر داده', 'danger'));
     summary.append(title);
-    const summaryStatus = node('small');
-    summary.append(summaryStatus);
+    const telemetry = requestTelemetry();
+    summary.append(telemetry.element);
     const path = node('code', endpoint.url);
     path.dir = 'ltr';
     const actions = node('div', '', 'actions');
@@ -569,22 +657,31 @@ function shippingView(service, view) {
     open.target = '_blank';
     open.rel = 'noreferrer noopener';
     open.hidden = true;
-    async function send() {
-      await editor?.ready;
-      report(message, 'در حال ارسال…');
-      summaryStatus.textContent = '…';
-      response.update('');
-      open.hidden = true;
+    async function send(context = connection.payload(), timeout = requestTimeout) {
+      if (sendButton.disabled) return null;
+      sendButton.disabled = true;
+      const values = { ...context.values };
       try {
-        const result = await api(service, 'run', { ...connection.payload(), endpoint: endpoint.id, body: request.value });
+        await editor?.ready;
+        telemetry.start(timeout);
+        report(message, '');
+        response.update('');
+        open.hidden = true;
+        const result = await sendTest(service, 'run', {
+          profileId: context.profileId, values, endpoint: endpoint.id, body: request.value
+        }, timeout);
         const ok = result.status >= 200 && result.status < 300;
-        const short = 'HTTP ' + result.status + ' · ' + result.ms + ' ms';
-        report(message, short, ok ? 'ok' : 'error');
-        summaryStatus.textContent = short;
+        telemetry.finish('HTTP ' + result.status, ok ? 'ok' : 'error', result.ms);
         try { response.update(JSON.stringify(JSON.parse(result.body), null, 2)); }
         catch { response.update(result.body); }
+        const live = connection.payload();
         for (const [name, value] of Object.entries(result.captured)) {
-          connection.inputs[name].value = value;
+          // Reuse captured IDs inside the batch without changing a different connection or newer input.
+          context.values[name] = value;
+          if (live.profileId === context.profileId && live.values.auth === values.auth &&
+              live.values.shop_id === values.shop_id && live.values[name] === values[name]) {
+            connection.inputs[name].value = value;
+          }
         }
         if (endpoint.html && ok) {
           open.href = result.url;
@@ -592,14 +689,16 @@ function shippingView(service, view) {
         }
         return ok;
       } catch (error) {
+        telemetry.fail(error);
         report(message, error.message, 'error');
-        summaryStatus.textContent = 'خطا';
         return false;
+      } finally {
+        sendButton.disabled = false;
       }
     }
     const sendButton = button('ارسال درخواست', () => {
       if (!endpoint.danger || window.confirm('این عملیات می‌تواند داده‌ها یا اعتبار سرویس را تغییر دهد. ارسال شود؟')) {
-        void locked(send);
+        void send();
       }
     }, 'primary');
     actions.prepend(sendButton);
@@ -608,7 +707,7 @@ function shippingView(service, view) {
     if (endpoint.note) entry.append(node('p', endpoint.note, 'muted'));
     entry.append(split, actions, message);
     list.append(entry);
-    cards.push({ endpoint, entry, group, sendButton, send });
+    cards.push({ endpoint, entry, group, send });
   }
   function filter() {
     const query = search.value.trim().toLowerCase();
@@ -665,6 +764,31 @@ for (const [service, config] of Object.entries(services)) {
   tab.prepend(icon);
   nav.append(tab);
 }
+const settings = node('dialog', '', 'request-settings');
+settings.setAttribute('aria-label', 'تنظیمات');
+const settingsHeader = node('div', '', 'topline');
+settingsHeader.append(node('h2', 'تنظیمات'), button('بستن', () => settings.close()));
+const settingsForm = node('form');
+const timeoutInput = node('input');
+Object.assign(timeoutInput, { type: 'number', min: '1', max: '60', step: '1', dir: 'ltr', required: true });
+const saveSettings = node('button', 'ذخیره', 'primary');
+saveSettings.type = 'submit';
+settingsForm.append(field('زمان انتظار پاسخ (ثانیه)', timeoutInput), saveSettings);
+settingsForm.addEventListener('submit', event => {
+  event.preventDefault();
+  requestTimeout = timeoutInput.valueAsNumber;
+  try { localStorage.setItem(timeoutKey, String(requestTimeout)); }
+  catch { /* The setting remains available for this page. */ }
+  settings.close();
+});
+settings.append(settingsHeader, settingsForm);
+document.body.append(settings);
+byId('settings-entry').addEventListener('click', () => {
+  timeoutInput.value = String(requestTimeout);
+  settings.showModal();
+  timeoutInput.focus();
+});
+
 const directory = node('dialog', '', 'connection-directory');
 directory.setAttribute('aria-label', 'لیست اتصال‌ها');
 const directoryHeader = node('div', '', 'topline');

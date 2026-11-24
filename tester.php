@@ -173,7 +173,13 @@ function api(array $env, string $method, string $service, string $action): mixed
         }
         return ['id' => $id, 'name' => $name];
     }
-    return $service === 'woo' ? woo($values, $input, $action === 'details') : shipping($service, $values, $input);
+    $timeout = $input->timeout ?? 18;
+    if (!is_int($timeout) || $timeout < 1 || $timeout > 60) {
+        throw new AppError(400, 'زمان انتظار باید یک عدد صحیح بین ۱ و ۶۰ ثانیه باشد.');
+    }
+    return $service === 'woo'
+        ? woo($values, $input, $action === 'details', $timeout)
+        : shipping($service, $values, $input, $timeout);
 }
 
 function wooCredentials(array $values): string {
@@ -191,7 +197,8 @@ function wooCredentials(array $values): string {
     return rtrim($site, '/');
 }
 
-function upstream(string $url, string $method = 'GET', ?string $auth = null, ?string $body = null): array {
+function upstream(string $url, int $deadline, string $method = 'GET', ?string $auth = null, ?string $body = null): array {
+    if (hrtime(true) >= $deadline) throw new AppError(504, 'زمان پاسخ سرویس تمام شد.');
     $host = trim((string) parse_url($url, PHP_URL_HOST), '[]');
     $isIp = filter_var($host, FILTER_VALIDATE_IP) !== false;
     $records = $isIp ? [] : dns_get_record($host, DNS_A | DNS_AAAA);
@@ -206,6 +213,8 @@ function upstream(string $url, string $method = 'GET', ?string $auth = null, ?st
             throw new AppError(400, 'آدرس سرویس باید به یک مقصد عمومی اشاره کند.');
         }
     }
+    $remaining = (int) ceil(($deadline - hrtime(true)) / 1e6);
+    if ($remaining <= 0) throw new AppError(504, 'زمان پاسخ سرویس تمام شد.');
     $address = $addresses[0];
     $headers = ['Accept: application/json, text/html', 'Accept-Encoding: identity'];
     if ($auth !== null && $auth !== '') $headers[] = 'Authorization: ' . $auth;
@@ -216,7 +225,7 @@ function upstream(string $url, string $method = 'GET', ?string $auth = null, ?st
     $options = [
         CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROXY => '',
         CURLOPT_CUSTOMREQUEST => $method, CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 18,
+        CURLOPT_CONNECTTIMEOUT_MS => $remaining, CURLOPT_TIMEOUT_MS => $remaining,
         CURLOPT_WRITEFUNCTION => static function ($handle, string $chunk) use (&$output, &$oversize): int {
             if (strlen($output) + strlen($chunk) > 8 * 1024 * 1024) {
                 $oversize = true;
@@ -264,7 +273,7 @@ function shippingEndpoints(string $service): array {
     return array_column($catalog[$service], null, 'id');
 }
 
-function shipping(string $service, array $values, object $input): array {
+function shipping(string $service, array $values, object $input, int $timeout): array {
     $id = $input->endpoint ?? null;
     $endpoint = is_string($id) ? (shippingEndpoints($service)[$id] ?? null) : null;
     if (!$endpoint) throw new AppError(404, 'مسیر تست پیدا نشد.');
@@ -284,7 +293,7 @@ function shipping(string $service, array $values, object $input): array {
         }
     }
     $start = hrtime(true);
-    $result = upstream($url, $endpoint['method'], $values['auth'] ?? null, $body);
+    $result = upstream($url, $start + $timeout * 1_000_000_000, $endpoint['method'], $values['auth'] ?? null, $body);
     $data = $result['status'] >= 200 && $result['status'] < 300 ? json_decode($result['body'], true) : null;
     $entries = $data['entries'] ?? [];
     $first = $entries['list'][0] ?? [];
@@ -316,13 +325,14 @@ function shipping(string $service, array $values, object $input): array {
     return $result + ['ms' => (int) round((hrtime(true) - $start) / 1e6), 'url' => $url, 'captured' => (object) $captured];
 }
 
-function woo(array $values, object $input, bool $details): array {
+function woo(array $values, object $input, bool $details, int $timeout): array {
+    $deadline = hrtime(true) + $timeout * 1_000_000_000;
     $site = wooCredentials($values);
     $auth = 'Basic ' . base64_encode($values['key'] . ':' . $values['secret']);
     $root = $site . '/wp-json/wc/v3';
     if ($details) {
         $query = http_build_query(['_fields' => 'environment.version,environment.wp_version,environment.php_version,environment.wp_memory_limit,security.secure_connection']);
-        $response = upstream($root . '/system_status?' . $query, auth: $auth);
+        $response = upstream($root . '/system_status?' . $query, $deadline, auth: $auth);
         $data = json_decode($response['body'], true);
         $env = $data['environment'] ?? null;
         if ($response['status'] !== 200 || !is_array($env)) {
@@ -334,7 +344,7 @@ function woo(array $values, object $input, bool $details): array {
     $limit = filter_var($input->limit ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 100]]);
     if ($limit === false) throw new AppError(400, 'تعداد سفارش باید بین ۱ تا ۱۰۰ باشد.');
     $endpoint = $root . '/orders';
-    $response = upstream($endpoint . '?per_page=' . $limit, auth: $auth);
+    $response = upstream($endpoint . '?per_page=' . $limit, $deadline, auth: $auth);
     $status = $response['status'];
     if ($status !== 200) {
         throw new AppError(502, match ($status) {
@@ -359,7 +369,7 @@ function woo(array $values, object $input, bool $details): array {
     }, $orders);
     $scope = 'unknown';
     try {
-        $probe = upstream($endpoint . '/batch', 'POST', $auth, '{"create":[],"update":[],"delete":[]}');
+        $probe = upstream($endpoint . '/batch', $deadline, 'POST', $auth, '{"create":[],"update":[],"delete":[]}');
         $data = json_decode($probe['body']);
         if ($probe['status'] === 200 && $data === []) $scope = 'write';
         $message = strtr((string) ($data->message ?? ''), ['ي' => 'ی', 'ك' => 'ک']);

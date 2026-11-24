@@ -161,3 +161,34 @@ dialog::backdrop { background: #070911b8; }
 .response-viewer pre { position: relative; }
 .response-viewer mark { color: #201500; background: #ffd05f; border-radius: 3px; }
 .orders + .response-viewer, dialog > .response-viewer { margin-top: 16px; }
+
+.settings-entry { display: flex; justify-content: flex-start; width: 100%; margin-top: 8px; }
+.request-settings form { display: grid; gap: 14px; margin-top: 16px; }
+.request-settings form button { justify-self: start; }
+.request-telemetry {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 8px 5px;
+  margin-inline-start: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 11px;
+  vertical-align: middle;
+  background: var(--input);
+  --signal-color: var(--accent);
+}
+.request-telemetry[data-state="ok"] { --signal-color: #77d7a5; }
+.request-telemetry[data-state="error"] { --signal-color: #ff9e9e; }
+.request-state { color: var(--signal-color); font-weight: bold; }
+.request-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.request-track { position: absolute; inset: auto 0 0; height: 2px; background: var(--signal-color); opacity: .6; }
+.request-telemetry[data-state="pending"] .request-track { animation: request-pulse 1s ease-in-out infinite alternate; }
+.panel > .request-telemetry, dialog > .request-telemetry { margin: 8px 0 0; }
+@keyframes request-pulse { from { transform: scaleX(.18); opacity: .36; } to { transform: scaleX(1); opacity: .82; } }
+@media (prefers-reduced-motion: reduce) { .request-telemetry[data-state="pending"] .request-track { animation: none; } }
+@media (max-width: 860px) { .settings-entry { display: inline-flex; width: auto; margin-inline-start: 8px; } }
