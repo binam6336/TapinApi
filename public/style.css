@@ -160,3 +160,4 @@ dialog::backdrop { background: #070911b8; }
 .response-search span { font-size: 12px; }
 .response-viewer pre { position: relative; }
 .response-viewer mark { color: #201500; background: #ffd05f; border-radius: 3px; }
+.orders + .response-viewer, dialog > .response-viewer { margin-top: 16px; }

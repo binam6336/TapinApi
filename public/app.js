@@ -227,25 +227,33 @@ function wooView(view) {
   const count = node('span', '—', 'badge');
   const orderStatus = status(idle);
   const orders = node('div', '', 'orders');
+  const ordersResponse = responseViewer('پاسخ ووکامرس (JSON)');
+  ordersResponse.panel.hidden = true;
   orderHead.append(node('h2', 'آخرین سفارش‌ها'), count);
-  orderPanel.append(orderHead, orderStatus, orders);
+  orderPanel.append(orderHead, orderStatus, orders, ordersResponse.panel);
   const dialog = node('dialog');
   dialog.setAttribute('aria-label', 'جزئیات فروشگاه');
   const detailsStatus = status();
   const detailFacts = node('div');
+  const detailsResponse = responseViewer('پاسخ جزئیات فروشگاه (JSON)');
+  detailsResponse.panel.hidden = true;
   const close = button('بستن', () => dialog.close());
   const dialogHead = node('div', '', 'topline');
   dialogHead.append(node('h2', 'جزئیات فروشگاه'), close);
-  dialog.append(dialogHead, detailsStatus, detailFacts);
+  dialog.append(dialogHead, detailsStatus, detailFacts, detailsResponse.panel);
   let successfulInput;
   const details = button('جزئیات بیشتر', async () => {
     if (!successfulInput) return;
     details.disabled = true;
     detailFacts.replaceChildren();
+    detailsResponse.update('');
+    detailsResponse.panel.hidden = true;
     report(detailsStatus, 'در حال دریافت…');
     dialog.showModal();
     try {
       const values = await api('woo', 'details', successfulInput);
+      detailsResponse.update(JSON.stringify(values, null, 2));
+      detailsResponse.panel.hidden = false;
       report(detailsStatus, '');
       detailFacts.append(facts([
         ['نسخه ووکامرس', values.version], ['نسخه وردپرس', values.wp_version],
@@ -269,6 +277,8 @@ function wooView(view) {
     count.textContent = '—';
     report(orderStatus, idle);
     orders.replaceChildren();
+    ordersResponse.update('');
+    ordersResponse.panel.hidden = true;
   }
   const connection = connectionPanel('woo', reset);
   const limit = node('input');
@@ -290,6 +300,8 @@ function wooView(view) {
         count.textContent = number.format(result.orders.length) + ' سفارش';
         report(orderStatus, result.orders.length ? 'برای دیدن جزئیات، سفارش را باز کنید.' : 'سفارشی پیدا نشد.');
         orders.replaceChildren(...result.orders.map(orderRow));
+        ordersResponse.update(JSON.stringify(result, null, 2));
+        ordersResponse.panel.hidden = false;
         successfulInput = input;
         details.hidden = false;
       } catch (error) {
@@ -364,13 +376,13 @@ function requestEditor(service, endpoint, request, drafts) {
   return { message, reset, retry, ready };
 }
 
-function responseViewer() {
+function responseViewer(label = 'پاسخ سرویس') {
   const panel = node('section', '', 'response-viewer');
   const toolbar = node('div', '', 'response-toolbar');
   const output = node('pre');
   output.dir = 'ltr';
   output.tabIndex = 0;
-  output.setAttribute('aria-label', 'متن پاسخ سرویس');
+  output.setAttribute('aria-label', label);
   const copyStatus = status();
   let text = '';
   const copy = button('کپی پاسخ', async () => {
@@ -463,7 +475,7 @@ function responseViewer() {
   search.append(input, previous, next, count);
   toolbar.append(copy, searchButton);
   copy.disabled = searchButton.disabled = true;
-  panel.append(node('div', 'پاسخ سرویس', 'response-label'), toolbar, search, output, copyStatus);
+  panel.append(node('div', label, 'response-label'), toolbar, search, output, copyStatus);
 
   return {
     panel,
