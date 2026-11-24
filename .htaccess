@@ -1,6 +1,7 @@
 DirectoryIndex index.php
 RewriteEngine On
 RewriteRule (^|/)\. - [F,END]
+RewriteRule ^wordpress(?:/|$) - [F,END]
 RewriteRule ^(?:tester\.php|public/login\.php)$ - [F,END]
 RewriteRule ^index\.php$ - [L]
 RewriteRule ^ index.php [END]

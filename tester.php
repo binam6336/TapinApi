@@ -79,23 +79,52 @@ function readInput(): object {
 function requestDrafts(array $env, string $method, string $service, string $key): mixed {
     if ($service === 'woo') throw new AppError(404, 'مسیر پیدا نشد.');
     if (!in_array($method, ['GET', 'POST'], true)) throw new AppError(405, 'روش درخواست نامعتبر است.');
+    $input = $method === 'GET' ? (object) ['operation' => 'load'] : readInput();
+    $profileId = $input->profileId ?? null;
+    $operation = $input->operation ?? 'save';
     $db = database($env);
-    if ($db->query("SHOW TABLES LIKE 'request\_drafts'")->fetchColumn() === false) {
-        $db->exec('CREATE TABLE IF NOT EXISTS request_drafts (
-            service VARCHAR(16) NOT NULL,
-            endpoint VARCHAR(64) NOT NULL,
-            data MEDIUMTEXT NOT NULL,
-            PRIMARY KEY (service, endpoint)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin');
+    if ($profileId !== null) {
+        if (!is_int($profileId) || $profileId <= 0) throw new AppError(400, 'شناسه اتصال نامعتبر است.');
+        $owner = query($db, 'SELECT id FROM profiles WHERE id = ? AND service = ?', [$profileId, $service])->fetchColumn();
+        if ($owner === false) throw new AppError(404, 'اتصال ذخیره‌شده پیدا نشد.');
+        if ($db->query("SHOW TABLES LIKE 'connection\_request\_drafts'")->fetchColumn() === false) {
+            $db->exec('CREATE TABLE IF NOT EXISTS connection_request_drafts (
+                profile_id INT UNSIGNED NOT NULL,
+                endpoint VARCHAR(64) NOT NULL,
+                data MEDIUMTEXT NOT NULL,
+                PRIMARY KEY (profile_id, endpoint),
+                FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin');
+        }
+        $table = 'connection_request_drafts';
+        $scope = 'profile_id';
+        $scopeId = $profileId;
+    } else {
+        // Keep legacy drafts available under the unsaved connection.
+        if ($db->query("SHOW TABLES LIKE 'request\_drafts'")->fetchColumn() === false) {
+            $db->exec('CREATE TABLE IF NOT EXISTS request_drafts (
+                service VARCHAR(16) NOT NULL,
+                endpoint VARCHAR(64) NOT NULL,
+                data MEDIUMTEXT NOT NULL,
+                PRIMARY KEY (service, endpoint)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin');
+        }
+        $table = 'request_drafts';
+        $scope = 'service';
+        $scopeId = $service;
     }
-    if ($method === 'GET') {
+    if ($operation === 'load') {
         $drafts = [];
-        foreach (query($db, 'SELECT endpoint, data FROM request_drafts WHERE service = ?', [$service]) as $row) {
+        foreach (query($db, "SELECT endpoint, data FROM $table WHERE $scope = ?", [$scopeId]) as $row) {
             $drafts[$row['endpoint']] = unseal($row['data'], $key)['body'];
         }
         return (object) $drafts;
     }
-    $input = readInput();
+    if ($operation === 'reset-all') {
+        query($db, "DELETE FROM $table WHERE $scope = ?", [$scopeId]);
+        return ['ok' => true];
+    }
+    if ($operation !== 'save') throw new AppError(400, 'عملیات پیش‌نویس نامعتبر است.');
     $id = $input->endpoint ?? null;
     $endpoint = is_string($id) ? (shippingEndpoints($service)[$id] ?? null) : null;
     if (($endpoint['method'] ?? null) !== 'POST') throw new AppError(404, 'مسیر قابل ویرایش پیدا نشد.');
@@ -103,11 +132,11 @@ function requestDrafts(array $env, string $method, string $service, string $key)
         throw new AppError(400, 'بدنه پیش‌نویس نامعتبر است.');
     }
     if ($input->body === null) {
-        query($db, 'DELETE FROM request_drafts WHERE service = ? AND endpoint = ?', [$service, $id]);
+        query($db, "DELETE FROM $table WHERE $scope = ? AND endpoint = ?", [$scopeId, $id]);
     } else {
         $data = seal(['body' => $input->body], $key);
-        query($db, 'INSERT INTO request_drafts (service, endpoint, data) VALUES (?, ?, ?)
-            ON DUPLICATE KEY UPDATE data = ?', [$service, $id, $data, $data]);
+        query($db, "INSERT INTO $table ($scope, endpoint, data) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE data = ?", [$scopeId, $id, $data, $data]);
     }
     return ['ok' => true];
 }
@@ -123,7 +152,8 @@ function api(array $env, string $method, string $service, string $action): mixed
         return query(database($env), 'SELECT id, name FROM profiles WHERE service = ? ORDER BY name', [$service])->fetchAll();
     }
     if ($method !== 'POST') throw new AppError(405, 'روش درخواست نامعتبر است.');
-    if ($action === 'details' && $service !== 'woo') throw new AppError(404, 'مسیر پیدا نشد.');
+    $wooOnly = ['details', 'order-options', 'create-orders', 'create-status'];
+    if (in_array($action, $wooOnly, true) && $service !== 'woo') throw new AppError(404, 'مسیر پیدا نشد.');
     $input = readInput();
     $id = $input->profileId ?? null;
     if (($id !== null || $action === 'remove') && (!is_int($id) || $id <= 0)) {
@@ -176,6 +206,13 @@ function api(array $env, string $method, string $service, string $action): mixed
     $timeout = $input->timeout ?? 18;
     if (!is_int($timeout) || $timeout < 1 || $timeout > 60) {
         throw new AppError(400, 'زمان انتظار باید یک عدد صحیح بین ۱ و ۶۰ ثانیه باشد.');
+    }
+    if (in_array($action, ['order-options', 'create-orders', 'create-status'], true)) {
+        if ($action !== 'order-options' && $id !== null && ($env['DASHBOARD_PASSWORD'] ?? '') === '' &&
+            (empty($input->values->key) || empty($input->values->secret))) {
+            throw new AppError(403, 'برای ثبت در اتصال ذخیره‌شده، کلید و رمز ووکامرس را وارد کنید یا ورود داشبورد را فعال کنید.');
+        }
+        return wooOrderAction($values, $input, $action, $timeout);
     }
     return $service === 'woo'
         ? woo($values, $input, $action === 'details', $timeout)
@@ -323,6 +360,138 @@ function shipping(string $service, array $values, object $input, int $timeout): 
         }
     }
     return $result + ['ms' => (int) round((hrtime(true) - $start) / 1e6), 'url' => $url, 'captured' => (object) $captured];
+}
+
+function wooStatusLabels(string $url, string $auth, int $deadline): array {
+    try {
+        $response = upstream($url, $deadline, auth: $auth);
+        $rows = json_decode($response['body'], true);
+        if ($response['status'] !== 200 || !is_array($rows)) return [];
+        $labels = [];
+        foreach ($rows as $row) {
+            if (is_string($row['slug'] ?? null) && is_string($row['name'] ?? null)) {
+                $labels[$row['slug']] = $row['name'];
+            }
+        }
+        return $labels;
+    } catch (AppError) {
+        return [];
+    }
+}
+
+function wooOrderStatuses(string $root, string $auth, int $deadline, bool $includeLabels = true): array {
+    $labels = [];
+    if ($includeLabels) {
+        $labels = wooStatusLabels($root . '/tapin/order-statuses', $auth, $deadline);
+    }
+    if (!$labels) {
+        $response = upstream($root . '/orders', $deadline, 'OPTIONS', $auth);
+        $data = json_decode($response['body'], true);
+        $slugs = $data['schema']['properties']['status']['enum'] ?? [];
+        if (!$slugs && !$includeLabels) {
+            $labels = wooStatusLabels($root . '/tapin/order-statuses', $auth, $deadline);
+        }
+        if (!$labels && ($includeLabels || !$slugs)) {
+            $labels = wooStatusLabels($root . '/reports/orders/totals?_fields=slug,name', $auth, $deadline);
+        }
+    }
+    $result = [];
+    foreach (($slugs ?? []) ?: array_keys($labels) as $slug) {
+        if (is_string($slug) && $slug !== 'any') $result[] = ['slug' => $slug, 'name' => $labels[$slug] ?? $slug];
+    }
+    if (!$result) throw new AppError(502, 'وضعیت‌های سفارش از ووکامرس دریافت نشد. دسترسی خواندن کلید و مسیر REST را بررسی کنید.');
+    return $result;
+}
+
+function wooOrderInteger(mixed $value, string $label, int $max = 2147483647): int {
+    if (!is_int($value) || $value < 1 || $value > $max) {
+        throw new AppError(400, $label . ' نامعتبر است.');
+    }
+    return $value;
+}
+
+function wooOrderAction(array $values, object $input, string $action, int $timeout): array {
+    $site = wooCredentials($values);
+    $root = $site . '/wp-json/wc/v3';
+    $auth = 'Basic ' . base64_encode($values['key'] . ':' . $values['secret']);
+    $deadline = hrtime(true) + $timeout * 1_000_000_000;
+    $host = parse_url($site, PHP_URL_HOST);
+    if ($action === 'order-options') return ['host' => $host, 'statuses' => wooOrderStatuses($root, $auth, $deadline)];
+
+    if ($action === 'create-status') {
+        $slug = is_string($input->slug ?? null) ? trim($input->slug) : '';
+        $name = is_string($input->name ?? null) ? trim($input->name) : '';
+        if (!preg_match('/^[a-z][a-z0-9-]{0,16}$/D', $slug) || str_starts_with($slug, 'wc-') ||
+            !preg_match('/^.{1,80}$/uD', $name)) {
+            throw new AppError(400, 'عنوان وضعیت و شناسه لاتین حداکثر ۱۷ کاراکتری را بررسی کنید.');
+        }
+        $response = upstream($root . '/tapin/order-statuses', $deadline, 'POST', $auth,
+            json_encode(['slug' => $slug, 'name' => $name], JSON_THROW_ON_ERROR));
+        $data = json_decode($response['body'], true);
+        if ($response['status'] === 404) {
+            throw new AppError(422, 'برای ساخت وضعیت، افزونه Tapin Order Statuses را روی همین وردپرس نصب و فعال کنید.');
+        }
+        if ($response['status'] === 409) throw new AppError(409, 'این وضعیت از قبل وجود دارد. فهرست را دوباره دریافت کنید.');
+        if ($response['status'] === 401 || $response['status'] === 403) {
+            throw new AppError(403, 'ساخت وضعیت به کلید نوشتن و دسترسی مدیریت ووکامرس نیاز دارد.');
+        }
+        if ($response['status'] !== 201 || !is_string($data['slug'] ?? null)) {
+            throw new AppError(502, 'ساخت وضعیت تأیید نشد. فهرست وضعیت‌ها را دوباره دریافت کنید.');
+        }
+        return ['slug' => $data['slug'], 'name' => $data['name'] ?? $name, 'host' => $host];
+    }
+
+    $count = wooOrderInteger($input->count ?? null, 'تعداد سفارش (۱ تا ۲۰)', 20);
+    $product = wooOrderInteger($input->productId ?? null, 'شناسه محصول');
+    $quantity = wooOrderInteger($input->quantity ?? null, 'تعداد محصول در هر سفارش');
+    $line = ['product_id' => $product, 'quantity' => $quantity];
+    if (isset($input->variationId)) $line['variation_id'] = wooOrderInteger($input->variationId, 'شناسه تنوع');
+    $status = $input->status ?? null;
+    if (!is_string($status) || $status === '') throw new AppError(400, 'وضعیت سفارش را انتخاب کنید.');
+    $billing = [];
+    foreach (['first_name', 'last_name', 'email', 'phone', 'address_1', 'city', 'postcode', 'country'] as $field) {
+        $value = $input->billing->$field ?? '';
+        if (!is_string($value) || !preg_match('/^.{0,200}$/uD', $value)) {
+            throw new AppError(400, 'یکی از فیلدهای مشتری نامعتبر است.');
+        }
+        if (trim($value) !== '') $billing[$field] = trim($value);
+    }
+    if (!empty($billing['email']) && !filter_var($billing['email'], FILTER_VALIDATE_EMAIL)) {
+        throw new AppError(400, 'ایمیل مشتری نامعتبر است.');
+    }
+    if (!empty($billing['country'])) {
+        $billing['country'] = strtoupper($billing['country']);
+        if (!preg_match('/^[A-Z]{2}$/D', $billing['country'])) throw new AppError(400, 'کد کشور باید دو حرف لاتین باشد.');
+    }
+    $statuses = wooOrderStatuses($root, $auth, $deadline, false);
+    if (!in_array($status, array_column($statuses, 'slug'), true)) {
+        throw new AppError(400, 'این وضعیت در فروشگاه موجود نیست. فهرست را دوباره دریافت کنید.');
+    }
+    $order = ['status' => $status, 'line_items' => [$line]];
+    if ($billing) $order['billing'] = $billing;
+    try {
+        $response = upstream($root . '/orders/batch', $deadline, 'POST', $auth,
+            json_encode(['create' => array_fill(0, $count, $order)], JSON_THROW_ON_ERROR));
+    } catch (AppError $error) {
+        throw new AppError($error->getCode(), $error->getMessage() . ' قبل از ارسال دوباره، سفارش‌های فروشگاه را بررسی کنید.');
+    }
+    $data = json_decode($response['body'], true);
+    if ($response['status'] === 401 || $response['status'] === 403) {
+        throw new AppError(403, 'این اتصال مجوز ثبت سفارش ندارد. دسترسی نوشتن کلید را بررسی کنید.');
+    }
+    if ($response['status'] < 200 || $response['status'] >= 300 || !is_array($data['create'] ?? null)) {
+        throw new AppError(502, 'نتیجه ثبت از فروشگاه قابل تأیید نیست. قبل از ارسال دوباره، سفارش‌های فروشگاه را بررسی کنید.');
+    }
+    $orders = [];
+    for ($index = 0; $index < $count; $index++) {
+        $entry = $data['create'][$index] ?? [];
+        $orders[] = [
+            'id' => $entry['id'] ?? null,
+            'status' => $entry['status'] ?? null,
+            'error' => $entry['error']['message'] ?? (isset($entry['id']) ? null : 'نتیجه این سفارش تأیید نشد.'),
+        ];
+    }
+    return ['host' => $host, 'orders' => $orders];
 }
 
 function woo(array $values, object $input, bool $details, int $timeout): array {

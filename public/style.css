@@ -192,3 +192,11 @@ dialog::backdrop { background: #070911b8; }
 @keyframes request-pulse { from { transform: scaleX(.18); opacity: .36; } to { transform: scaleX(1); opacity: .82; } }
 @media (prefers-reduced-motion: reduce) { .request-telemetry[data-state="pending"] .request-track { animation: none; } }
 @media (max-width: 860px) { .settings-entry { display: inline-flex; width: auto; margin-inline-start: 8px; } }
+
+.woo-create { width: min(630px, calc(100% - 28px)); max-height: 88vh; }
+.woo-create form { margin-top: 14px; }
+.woo-create-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.woo-create-fields details .fields { margin-block: 10px 0; }
+.woo-create > details { margin-top: 14px; }
+.woo-create-results { padding-inline-start: 24px; }
+.woo-create-results:empty { display: none; }

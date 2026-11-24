@@ -294,6 +294,171 @@ function orderRow(order) {
   return entry;
 }
 
+function wooOrderForm(connection) {
+  const dialog = node('dialog', '', 'woo-create');
+  dialog.setAttribute('aria-label', 'افزودن سفارش');
+  const header = node('div', '', 'topline');
+  const close = button('بستن', () => dialog.close());
+  header.append(node('h2', 'افزودن سفارش'), close);
+  const notice = status();
+  const timing = requestTelemetry();
+  const results = node('ol', '', 'woo-create-results');
+  const form = node('form');
+  const fields = node('fieldset', '', 'woo-create-fields fields');
+  const integer = (initial, max, required = true) => {
+    const input = node('input');
+    Object.assign(input, { type: 'number', min: '1', max: String(max), step: '1', value: initial, required, dir: 'ltr' });
+    return input;
+  };
+  const count = integer('1', 20);
+  const product = integer('', 2147483647);
+  const quantity = integer('1', 2147483647);
+  const variation = integer('', 2147483647, false);
+  fields.append(field('تعداد سفارش (حداکثر ۲۰)', count), field('شناسه محصول', product),
+    field('تعداد محصول در هر سفارش', quantity), field('شناسه تنوع (اختیاری)', variation));
+  const billing = {};
+  const billingFields = node('div', '', 'fields');
+  for (const [key, label, type] of [
+    ['first_name', 'نام', 'text'], ['last_name', 'نام خانوادگی', 'text'],
+    ['email', 'ایمیل', 'email'], ['phone', 'تلفن', 'tel'],
+    ['address_1', 'آدرس', 'text'], ['city', 'شهر', 'text'],
+    ['postcode', 'کد پستی', 'text'], ['country', 'کد کشور مثل IR', 'text']
+  ]) {
+    const input = node('input');
+    input.type = type;
+    input.maxLength = key === 'country' ? 2 : 200;
+    if (key === 'country') input.pattern = '[A-Za-z]{2}';
+    billing[key] = input;
+    billingFields.append(field(label, input));
+  }
+  const billingDetails = node('details', '', 'full');
+  billingDetails.append(node('summary', 'اطلاعات مشتری (اختیاری)'), billingFields);
+  fields.append(billingDetails);
+  const select = node('select');
+  select.required = true;
+  const load = button('انتخاب وضعیت از فروشگاه', () => void loadStatuses());
+  const submit = node('button', 'ثبت سفارش‌ها', 'primary');
+  submit.type = 'submit';
+  const actions = node('div', '', 'actions');
+  actions.append(load, submit);
+  fields.append(field('وضعیت سفارش', select));
+  form.append(fields, actions);
+  const custom = node('details');
+  const customForm = node('form', '', 'fields');
+  const label = node('input');
+  Object.assign(label, { required: true, maxLength: 80 });
+  const slug = node('input');
+  Object.assign(slug, { required: true, maxLength: 17, pattern: '[a-z][a-z0-9\x2d]{0,16}', dir: 'ltr' });
+  slug.placeholder = 'ready-to-pack';
+  const create = node('button', 'ساخت وضعیت در فروشگاه');
+  create.type = 'submit';
+  customForm.append(field('عنوان وضعیت', label), field('شناسه لاتین وضعیت', slug), create);
+  custom.append(node('summary', 'ساخت وضعیت جدید'), customForm);
+  dialog.append(header, form, custom, timing.element, notice, results);
+
+  let target;
+  let host = '';
+  let options = [];
+  let busy = false;
+
+  function renderOptions(selected = '') {
+    select.replaceChildren(new Option('یک وضعیت انتخاب کنید', ''), ...options.map(item =>
+      new Option(Object.hasOwn(orderStatuses, item.name) ? orderStatuses[item.name] : item.name, item.slug)));
+    select.value = selected;
+    updateControls();
+  }
+  function updateControls() {
+    fields.disabled = busy;
+    load.disabled = close.disabled = create.disabled = busy;
+    submit.disabled = busy || !select.value;
+    label.disabled = slug.disabled = busy;
+    select.disabled = busy || !options.length;
+  }
+  select.addEventListener('change', updateControls);
+  dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+
+  async function execute(action, data, onSuccess) {
+    if (busy) return;
+    busy = true;
+    updateControls();
+    report(notice, '');
+    const timeout = requestTimeout;
+    timing.start(timeout);
+    try {
+      const result = await sendTest('woo', action, { ...target, ...data }, timeout);
+      timing.finish('پاسخ دریافت شد', 'ok');
+      onSuccess(result);
+    } catch (error) {
+      timing.fail(error);
+      const unknown = action === 'create-orders' && (error.status === 504 || !error.status);
+      report(notice, unknown ? error.message + ' پیش از ارسال دوباره، سفارش‌های فروشگاه را بررسی کنید.' : error.message, 'error');
+    } finally {
+      busy = false;
+      updateControls();
+    }
+  }
+  function loadStatuses() {
+    return execute('order-options', {}, result => {
+      const selected = select.value;
+      host = result.host;
+      options = result.statuses;
+      renderOptions(selected);
+      report(notice, 'وضعیت‌ها از ' + host + ' دریافت شدند.', 'ok');
+    });
+  }
+  customForm.addEventListener('submit', event => {
+    event.preventDefault();
+    if (!customForm.reportValidity()) return;
+    void execute('create-status', { name: label.value.trim(), slug: slug.value.trim() }, result => {
+      host = result.host ?? host;
+      options = options.filter(item => item.slug !== result.slug);
+      options.push({ slug: result.slug, name: result.name });
+      renderOptions(result.slug);
+      customForm.reset();
+      custom.open = false;
+      report(notice, 'وضعیت در فروشگاه ساخته و انتخاب شد.', 'ok');
+    });
+  });
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    if (busy || !form.reportValidity() || !select.value) return;
+    const total = count.valueAsNumber;
+    if (!window.confirm('ثبت ' + number.format(total) + ' سفارش با وضعیت «' +
+        select.selectedOptions[0].text + '»' + (host ? ' در ' + host : '') + ' تأیید می‌شود؟')) return;
+    results.replaceChildren();
+    void execute('create-orders', {
+      count: total, productId: product.valueAsNumber, quantity: quantity.valueAsNumber,
+      variationId: variation.value ? variation.valueAsNumber : null, status: select.value,
+      billing: Object.fromEntries(Object.entries(billing).map(([key, input]) => [key, input.value]))
+    }, result => {
+      const added = result.orders.filter(order => order.id).length;
+      report(notice, number.format(added) + ' از ' + number.format(total) + ' سفارش در ' +
+        result.host + ' ثبت شد.', added === total ? 'ok' : 'error');
+      for (const order of result.orders) {
+        results.append(node('li', order.id ? 'سفارش #' + order.id + ' · ' +
+          (options.find(item => item.slug === order.status)?.name ?? order.status ?? '—') : order.error,
+        order.id ? '' : 'error'));
+      }
+    });
+  });
+
+  const open = button('افزودن سفارش', () => {
+    if (!connection.form.reportValidity()) return;
+    target = connection.payload();
+    options = [];
+    host = '';
+    form.reset();
+    customForm.reset();
+    custom.open = false;
+    results.replaceChildren();
+    report(notice, '');
+    timing.clear();
+    renderOptions();
+    dialog.showModal();
+  });
+  return { dialog, open };
+}
+
 function wooView(view) {
   const idle = 'پس از اتصال، سفارش‌ها اینجا نمایش داده می‌شوند.';
   const scopePanel = node('section', '', 'panel');
@@ -400,69 +565,117 @@ function wooView(view) {
       }
     });
   }, 'primary');
+  const orderCreation = wooOrderForm(connection);
+  orderHead.append(orderCreation.open);
   connection.actions.prepend(run);
   connection.form.addEventListener('submit', () => run.click());
-  view.append(connection.panel, scopePanel, orderPanel, dialog);
+  view.append(connection.panel, scopePanel, orderPanel, dialog, orderCreation.dialog);
   return connection;
 }
 
-function requestEditor(service, endpoint, request, drafts) {
+function requestEditor(service, endpoint, request) {
   const template = JSON.stringify(endpoint.body, null, 2);
-  const message = status('در حال بارگیری پیش‌نویس…');
-  const retry = button('تلاش دوباره', () => void flush());
-  retry.hidden = true;
-  let timer;
-  let pending;
-  let saving = false;
-
-  async function flush() {
-    clearTimeout(timer);
-    if (saving || pending === undefined) return;
-    const body = pending;
-    pending = undefined;
-    saving = true;
-    retry.hidden = true;
-    report(message, 'در حال ذخیره…');
-    let saved = false;
-    try {
-      await api(service, 'drafts', { endpoint: endpoint.id, body });
-      saved = true;
-      if (pending === undefined) report(message, body === null ? 'نمونه پیش‌فرض بازیابی شد.' : 'پیش‌نویس ذخیره شد.', 'ok');
-    } catch (error) {
-      if (pending === undefined) pending = body;
-      report(message, error.message, 'error');
-      retry.hidden = false;
-    } finally {
-      saving = false;
-      if (saved && pending !== undefined) void flush();
-    }
-  }
-
-  function schedule(body, immediately = false) {
-    pending = body;
-    retry.hidden = true;
-    clearTimeout(timer);
-    if (immediately) void flush();
-    else {
-      report(message, 'در انتظار ذخیره…');
-      timer = setTimeout(flush, 400);
-    }
-  }
-
-  const reset = button('بازنشانی JSON', () => {
-    request.value = template;
-    schedule(null, true);
-  });
+  const message = status();
+  let active;
+  const states = new Map();
+  const retry = button('تلاش دوباره', () => void flush(active));
+  const reset = button('بازنشانی JSON', () => schedule(null));
   request.value = template;
-  request.disabled = reset.disabled = true;
-  const ready = drafts.then(result => {
-    request.value = result.values?.[endpoint.id] ?? template;
-    report(message, result.error ?? '', result.error ? 'error' : 'muted');
-    request.disabled = reset.disabled = false;
-  });
+
+  function stateFor(scope) {
+    if (states.has(scope)) return states.get(scope);
+    const state = { scope, body: template, loaded: false, text: 'در حال بارگیری پیش‌نویس…', tone: 'muted' };
+    states.set(scope, state);
+    state.ready = scope.ready.then(result => {
+      state.body = result.values?.[endpoint.id] ?? template;
+      state.loaded = true;
+      state.text = result.error ?? '';
+      state.tone = result.error ? 'error' : 'muted';
+      if (active === state) {
+        request.value = state.body;
+        render(state);
+      }
+    });
+    return state;
+  }
+  function render(state) {
+    if (active !== state) return;
+    request.disabled = reset.disabled = !state.loaded || state.scope.resetting;
+    retry.hidden = !(state.tone === 'error' && state.pending !== undefined);
+    retry.disabled = state.scope.resetting;
+    report(message, state.text, state.tone);
+  }
+  function update(state, text, tone = 'muted') {
+    state.text = text;
+    state.tone = tone;
+    render(state);
+  }
+  function flush(state) {
+    if (!state || state.scope.resetting) return;
+    clearTimeout(state.timer);
+    if (state.saving || state.pending === undefined) return;
+    const body = state.pending;
+    state.pending = undefined;
+    update(state, 'در حال ذخیره…');
+    state.saving = api(service, 'drafts', { profileId: state.scope.id, endpoint: endpoint.id, body })
+      .then(() => {
+        if (state.pending === undefined) update(state, body === null ? 'نمونه پیش‌فرض بازیابی شد.' : 'پیش‌نویس ذخیره شد.', 'ok');
+        return true;
+      }, error => {
+        if (state.pending === undefined) state.pending = body;
+        update(state, error.message, 'error');
+        return false;
+      }).then(saved => {
+        state.saving = undefined;
+        if (saved && state.pending !== undefined) flush(state);
+      });
+  }
+  function schedule(body) {
+    const state = active;
+    if (!state?.loaded || state.scope.resetting) return;
+    state.body = request.value = body ?? template;
+    state.pending = body;
+    clearTimeout(state.timer);
+    update(state, 'در انتظار ذخیره…');
+    if (body === null) flush(state);
+    else state.timer = setTimeout(() => flush(state), 400);
+  }
   request.addEventListener('input', () => schedule(request.value));
-  request.addEventListener('blur', () => { if (retry.hidden) void flush(); });
-  return { message, reset, retry, ready };
+  request.addEventListener('blur', () => { if (retry.hidden) flush(active); });
+  return {
+    message, reset, retry,
+    activate(scope) {
+      if (active?.scope === scope) return;
+      if (active?.tone !== 'error') flush(active);
+      active = stateFor(scope);
+      request.value = active.body;
+      render(active);
+    },
+    async bodyFor(scope) {
+      const state = stateFor(scope);
+      await state.ready;
+      return state.body;
+    },
+    async pause(scope) {
+      const state = stateFor(scope);
+      clearTimeout(state.timer);
+      render(state);
+      await state.ready;
+      await state.saving;
+    },
+    resume(scope, resetApplied) {
+      const state = stateFor(scope);
+      if (resetApplied) {
+        state.pending = undefined;
+        state.body = template;
+        if (active === state) request.value = template;
+        update(state, '');
+      } else {
+        render(state);
+        flush(state);
+      }
+    }
+  };
 }
 
 function responseViewer(label = 'پاسخ سرویس') {
@@ -580,10 +793,26 @@ function responseViewer(label = 'پاسخ سرویس') {
 
 function shippingView(service, view) {
   const endpoints = catalog[service];
-  const drafts = api(service, 'drafts').then(values => ({ values }), error => ({ error: error.message }));
   const cards = [];
   let running = false;
-  const connection = connectionPanel(service, () => {});
+  const scopes = new Map();
+  let currentScope;
+  function draftScope(id) {
+    if (!scopes.has(id)) {
+      const input = id === null ? undefined : { operation: 'load', profileId: id };
+      const ready = api(service, 'drafts', input).then(values => ({ values }), error => ({ error: error.message }));
+      scopes.set(id, { id, ready, resetting: false });
+    }
+    return scopes.get(id);
+  }
+  function selectDraftScope() {
+    const previous = currentScope;
+    currentScope = draftScope(connection.payload().profileId);
+    if (previous && previous !== currentScope) report(resetStatus, '');
+    for (const card of cards) card.editor?.activate(currentScope);
+    resetAll.disabled = currentScope.resetting;
+  }
+  const connection = connectionPanel(service, selectDraftScope);
   const tools = node('section', '', 'panel');
   const list = node('section', '', 'panel full');
   const heading = node('div', '', 'topline');
@@ -596,7 +825,29 @@ function shippingView(service, view) {
   const queueStatus = status();
   const runSafe = button('اجرای گروهی مسیرهای بدون تغییر', () => runQueue());
   tools.append(node('h2', 'ابزار تست'), field('جستجوی مسیر', search), node('div', '', 'actions'), queueStatus);
-  tools.querySelector('.actions').append(runSafe);
+  const resetStatus = status();
+  const resetAll = button('بازنشانی همه درخواست‌ها', async () => {
+    const scope = currentScope;
+    if (scope.resetting || !window.confirm('همه پیش‌نویس‌های این اتصال به نمونه‌های پیش‌فرض برگردند؟')) return;
+    scope.resetting = true;
+    resetAll.disabled = true;
+    report(resetStatus, 'در حال بازنشانی…');
+    let success = false;
+    try {
+      await Promise.all(cards.map(card => card.editor?.pause(scope)));
+      await api(service, 'drafts', { profileId: scope.id, operation: 'reset-all' });
+      success = true;
+      if (currentScope === scope) report(resetStatus, 'همه درخواست‌های این اتصال بازنشانی شدند.', 'ok');
+    } catch (error) {
+      if (currentScope === scope) report(resetStatus, error.message, 'error');
+    } finally {
+      scope.resetting = false;
+      for (const card of cards) card.editor?.resume(scope, success);
+      resetAll.disabled = currentScope.resetting;
+    }
+  });
+  tools.querySelector('.actions').append(runSafe, resetAll);
+  tools.append(resetStatus);
 
   async function runQueue() {
     if (running) return;
@@ -644,7 +895,7 @@ function shippingView(service, view) {
     const request = node('textarea');
     request.dir = 'ltr';
     request.spellcheck = false;
-    const editor = endpoint.method === 'POST' ? requestEditor(service, endpoint, request, drafts) : null;
+    const editor = endpoint.method === 'POST' ? requestEditor(service, endpoint, request) : null;
     if (editor) {
       const body = node('div');
       body.append(field('بدنه درخواست (JSON)', request), editor.message);
@@ -662,13 +913,13 @@ function shippingView(service, view) {
       sendButton.disabled = true;
       const values = { ...context.values };
       try {
-        await editor?.ready;
+        const body = await editor?.bodyFor(draftScope(context.profileId));
         telemetry.start(timeout);
         report(message, '');
         response.update('');
         open.hidden = true;
         const result = await sendTest(service, 'run', {
-          profileId: context.profileId, values, endpoint: endpoint.id, body: request.value
+          profileId: context.profileId, values, endpoint: endpoint.id, body
         }, timeout);
         const ok = result.status >= 200 && result.status < 300;
         telemetry.finish('HTTP ' + result.status, ok ? 'ok' : 'error', result.ms);
@@ -707,7 +958,7 @@ function shippingView(service, view) {
     if (endpoint.note) entry.append(node('p', endpoint.note, 'muted'));
     entry.append(split, actions, message);
     list.append(entry);
-    cards.push({ endpoint, entry, group, send });
+    cards.push({ endpoint, entry, group, send, editor });
   }
   function filter() {
     const query = search.value.trim().toLowerCase();
@@ -725,6 +976,7 @@ function shippingView(service, view) {
     runSafe.hidden = !cards.some(card => !card.entry.hidden && !card.endpoint.danger);
   }
   search.addEventListener('input', filter);
+  selectDraftScope();
   filter();
   view.append(connection.panel, tools, list);
   return connection;
