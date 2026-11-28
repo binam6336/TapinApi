@@ -360,15 +360,21 @@
       }
     },
     {
-      "id": "indirect_new",
-      "title": "درگاه بانکی (افزایش اعتبار)",
+      "id": "payman_request",
+      "title": "درگاه پرداخت مستقیم زرین‌پال",
       "method": "POST",
-      "url": "https://api.tapin.ir/api/v2/public/transaction/indirect/new/",
+      "url": "https://api.zarinpal.com/pg/v4/payman/request.json",
       "danger": true,
+      "note": "کد پذیرنده ۳۶ کاراکتری، شماره موبایل خریدار و آدرس بازگشت خود را وارد کنید. انقضای قرارداد باید حداقل ۳۰ روز باشد. مبلغ سقف تراکنش به ریال است. کد ملی اختیاری است. توکن اتصال در هدر Authorization به زرین‌پال ارسال می‌شود. پاسخ موفق شامل data.payman_authority و data.code برابر 100 است.",
       "body": {
-        "shop_id": "{{shop_id}}",
-        "price": 100000,
-        "redirect_page": "https://yourdomain.ir/"
+        "merchant_id": "",
+        "mobile": "",
+        "ssn": "",
+        "expire_at": "",
+        "max_daily_count": "3",
+        "max_monthly_count": "10",
+        "max_amount": "1000000",
+        "callback_url": ""
       }
     },
     {

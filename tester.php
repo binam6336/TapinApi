@@ -361,10 +361,31 @@ function shippingEndpoints(string $service): array {
     return array_column($catalog[$service], null, 'id');
 }
 
+function paymanPayload(mixed $input): array {
+    if (!is_object($input)) throw new AppError(400, 'بدنه درخواست زرین‌پال باید یک شیء JSON باشد.');
+    $payload = [];
+    foreach (['merchant_id', 'mobile', 'expire_at', 'max_daily_count', 'max_monthly_count', 'max_amount', 'callback_url'] as $field) {
+        $value = $input->$field ?? null;
+        if (!is_string($value) || trim($value) === '') {
+            throw new AppError(400, 'مقدار ' . $field . ' را به‌صورت رشته وارد کنید.');
+        }
+        $payload[$field] = trim($value);
+    }
+    if (strlen($payload['merchant_id']) !== 36) {
+        throw new AppError(400, 'کد پذیرنده زرین‌پال باید ۳۶ کاراکتر باشد.');
+    }
+    if (isset($input->ssn)) {
+        if (!is_string($input->ssn)) throw new AppError(400, 'کد ملی را به‌صورت رشته وارد کنید.');
+        if (trim($input->ssn) !== '') $payload['ssn'] = trim($input->ssn);
+    }
+    return $payload;
+}
+
 function shipping(string $service, array $values, object $input, int $timeout): array {
     $id = $input->endpoint ?? null;
     $endpoint = is_string($id) ? (shippingEndpoints($service)[$id] ?? null) : null;
     if (!$endpoint) throw new AppError(404, 'مسیر تست پیدا نشد.');
+    $payman = $service === 'post' && $id === 'payman_request';
     $url = preg_replace_callback('/\{\{(\w+)\}\}/', static function (array $match) use ($values): string {
         $value = $values[$match[1]] ?? '';
         if (!preg_match('/^[\w=-]+$/D', $value)) throw new AppError(400, 'مقدار ' . $match[1] . ' را بررسی کنید.');
@@ -375,7 +396,8 @@ function shipping(string $service, array $values, object $input, int $timeout): 
         try {
             if (!is_string($input->body ?? null)) throw new JsonException();
             $parsed = json_decode($input->body, false, 512, JSON_THROW_ON_ERROR);
-            $body = json_encode(replaceBody($parsed, $values, $service === 'post'), JSON_THROW_ON_ERROR);
+            $payload = $payman ? paymanPayload($parsed) : replaceBody($parsed, $values, $service === 'post');
+            $body = json_encode($payload, JSON_THROW_ON_ERROR);
         } catch (JsonException) {
             throw new AppError(400, 'بدنه درخواست باید JSON معتبر باشد.');
         }
