@@ -200,7 +200,7 @@ function api(array $env, string $method, string $service, string $action): mixed
     $input = readInput();
     if ($action === 'profile-order') return saveProfileOrder(database($env), $service, $input->ids ?? null);
     $id = $input->profileId ?? null;
-    if (($id !== null || $action === 'remove') && (!is_int($id) || $id <= 0)) {
+    if (($id !== null || in_array($action, ['remove', 'profile-details'], true)) && (!is_int($id) || $id <= 0)) {
         throw new AppError(400, 'شناسه اتصال نامعتبر است.');
     }
     $db = $id !== null || $action === 'profiles' ? database($env) : null;
@@ -213,17 +213,24 @@ function api(array $env, string $method, string $service, string $action): mixed
     $values = [];
     $previous = null;
     if ($id !== null) {
-        $previous = query($db, 'SELECT data FROM profiles WHERE service = ? AND id = ?', [$service, $id])->fetchColumn();
-        if ($previous === false) throw new AppError(404, 'اتصال ذخیره‌شده پیدا نشد.');
+        $row = query($db, 'SELECT name, data FROM profiles WHERE service = ? AND id = ?', [$service, $id])->fetch();
+        if ($row === false) throw new AppError(404, 'اتصال ذخیره‌شده پیدا نشد.');
+        $previous = $row['data'];
         $values = unseal($previous, $key);
-    }
-    foreach (FIELDS[$service] as $field) {
-        $value = $input->values->$field ?? null;
-        if ($value === null) continue;
-        if (!is_string($value) || strlen($value) > 4096 || strpbrk($value, "\r\n\0") !== false) {
-            throw new AppError(400, 'مقدار یکی از فیلدهای اتصال نامعتبر است.');
+        if ($action === 'profile-details') {
+            $visibleFields = array_diff(FIELDS[$service], ['auth', 'key', 'secret', 'hash']);
+            return ['name' => $row['name'], 'values' => (object) array_intersect_key($values, array_flip($visibleFields))];
         }
-        $values[$field] = trim($value);
+    }
+    if ($id === null || $action === 'profiles') {
+        foreach (FIELDS[$service] as $field) {
+            $value = $input->values->$field ?? null;
+            if ($value === null) continue;
+            if (!is_string($value) || strlen($value) > 4096 || strpbrk($value, "\r\n\0") !== false) {
+                throw new AppError(400, 'مقدار یکی از فیلدهای اتصال نامعتبر است.');
+            }
+            $values[$field] = trim($value);
+        }
     }
     if ($action === 'profiles') {
         $name = is_string($input->name ?? null) ? trim($input->name) : '';
@@ -252,15 +259,15 @@ function api(array $env, string $method, string $service, string $action): mixed
         throw new AppError(400, 'زمان انتظار باید یک عدد صحیح بین ۱ و ۶۰ ثانیه باشد.');
     }
     if (in_array($action, $wooReads, true) || in_array($action, $wooWrites, true)) {
-        if (in_array($action, $wooWrites, true) && $id !== null && ($env['DASHBOARD_PASSWORD'] ?? '') === '' &&
-            (empty($input->values->key) || empty($input->values->secret))) {
-            throw new AppError(403, 'برای ثبت در اتصال ذخیره‌شده، کلید و رمز ووکامرس را وارد کنید یا ورود داشبورد را فعال کنید.');
+        if (in_array($action, $wooWrites, true) && $id !== null && ($env['DASHBOARD_PASSWORD'] ?? '') === '') {
+            throw new AppError(403, 'برای ثبت با اتصال ذخیره‌شده، ورود داشبورد را فعال کنید یا از اتصال موقت استفاده کنید.');
         }
         return wooOrderAction($values, $input, $action, $timeout);
     }
-    return $service === 'woo'
-        ? woo($values, $input, $action === 'details', $timeout)
-        : shipping($service, $values, $input, $timeout);
+    if ($service === 'woo') return woo($values, $input, $action === 'details', $timeout);
+    $result = shipping($service, $values, $input, $timeout);
+    if ($id !== null) $result['captured'] = (object) [];
+    return $result;
 }
 
 function wooCredentials(array $values): string {

@@ -233,6 +233,129 @@ function sortableProfiles(choices, move) {
   };
 }
 
+function connectionEditor(service, onSave, onTemporary, onRemove) {
+  const dialog = node('dialog', '', 'connection-dialog');
+  const title = node('h2');
+  title.id = 'connection-editor-title-' + service;
+  dialog.setAttribute('aria-labelledby', title.id);
+  const close = button('بستن', () => dialog.close());
+  const header = node('div', '', 'topline');
+  header.append(title, close);
+  const form = node('form');
+  form.autocomplete = 'off';
+  const group = node('fieldset');
+  const fields = node('div', '', 'fields');
+  const help = status();
+  const message = status();
+  const name = node('input');
+  Object.assign(name, { maxLength: 80, placeholder: 'برای نمونه، فروشگاه اصلی' });
+  fields.append(field('نام اتصال برای ذخیره', name));
+  const secrets = new Set(['auth', 'key', 'secret', 'hash']);
+  const inputs = {};
+  for (const key of services[service].fields) {
+    const input = node('input');
+    input.type = secrets.has(key) ? 'password' : key === 'site' ? 'url' : 'text';
+    input.autocomplete = secrets.has(key) ? 'new-password' : 'off';
+    input.dir = 'ltr';
+    input.maxLength = 4096;
+    input.placeholder = placeholders[key] ?? '';
+    inputs[key] = input;
+    const control = field(labels[key], input);
+    if (key === 'site') control.className = 'full';
+    fields.append(control);
+  }
+  let profile;
+  let original = {};
+  let loaded = false;
+  function values() {
+    const changed = {};
+    for (const [key, input] of Object.entries(inputs)) {
+      const value = input.value.trim();
+      if (profile && secrets.has(key) && !value) continue;
+      if (value !== (original[key] ?? '')) changed[key] = value;
+    }
+    return changed;
+  }
+  async function save() {
+    if (!loaded || group.disabled || !form.reportValidity()) return;
+    if (!name.value.trim()) {
+      report(message, 'نام اتصال را وارد کنید.', 'error');
+      name.focus();
+      return;
+    }
+    await work(async () => {
+      await onSave({ profileId: profile?.id ?? null, name: name.value, values: values() });
+      dialog.close();
+    });
+  }
+  async function work(operation) {
+    group.disabled = true;
+    close.disabled = true;
+    report(message, '');
+    try { await operation(); }
+    catch (error) { report(message, error.message, 'error'); }
+    finally { group.disabled = false; close.disabled = false; }
+  }
+  const saveButton = button('ذخیره اتصال', () => void save(), 'primary');
+  const temporary = button('تست بدون ذخیره', () => {
+    if (!form.reportValidity()) return;
+    onTemporary(values());
+    dialog.close();
+  });
+  const remove = button('حذف اتصال', () => {
+    if (!profile || !window.confirm('این اتصال از دیتابیس حذف شود؟')) return;
+    void work(async () => {
+      await onRemove(profile.id);
+      dialog.close();
+    });
+  }, 'danger');
+  const actions = node('div', '', 'actions');
+  actions.append(saveButton, temporary, remove);
+  group.append(fields, actions);
+  form.append(group);
+  dialog.append(header, help, form, message);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    void save();
+  });
+  dialog.addEventListener('cancel', event => { if (group.disabled) event.preventDefault(); });
+  dialog.addEventListener('close', () => { if (!dialog.open) form.reset(); });
+
+  return {
+    dialog,
+    async open(selected, temporaryValues) {
+      profile = selected;
+      original = {};
+      loaded = !profile;
+      saveButton.disabled = !loaded;
+      form.reset();
+      title.textContent = profile ? 'ویرایش اتصال' : 'افزودن اتصال';
+      saveButton.textContent = profile ? 'به‌روزرسانی اتصال' : 'ذخیره اتصال';
+      remove.hidden = !profile;
+      temporary.hidden = Boolean(profile);
+      report(help, profile ? 'برای حفظ رمز، کلید یا توکن فعلی، فیلد مربوط به آن را خالی بگذارید.' : '');
+      report(message, '');
+      for (const key of secrets) {
+        if (inputs[key]) inputs[key].placeholder = profile ? 'بدون تغییر' : (placeholders[key] ?? '');
+      }
+      if (!profile) {
+        for (const [key, input] of Object.entries(inputs)) input.value = temporaryValues[key] ?? '';
+        dialog.showModal();
+        return;
+      }
+      dialog.showModal();
+      await work(async () => {
+        const result = await api(service, 'profile-details', { profileId: profile.id });
+        original = result.values;
+        name.value = result.name;
+        for (const [key, input] of Object.entries(inputs)) input.value = original[key] ?? '';
+        loaded = true;
+        saveButton.disabled = false;
+      });
+    }
+  };
+}
+
 function connectionPanel(service, onChange) {
   const config = services[service];
   const panel = node('section', '', 'panel');
@@ -247,42 +370,12 @@ function connectionPanel(service, onChange) {
   picker.append(legend, choices);
   let profiles = [];
   let selectedId = null;
-  const name = node('input');
-  name.maxLength = 80;
-  name.placeholder = 'برای نمونه، فروشگاه اصلی';
-  const fields = node('div', '', 'fields');
-  const inputs = {};
-  for (const key of config.fields) {
-    const input = node('input');
-    input.dir = 'ltr';
-    input.type = ['key', 'secret', 'auth'].includes(key) ? 'password' : key === 'site' ? 'url' : 'text';
-    input.maxLength = 4096;
-    input.placeholder = placeholders[key] ?? '';
-    inputs[key] = input;
-    const label = field(labels[key], input);
-    if (key === 'site') label.className = 'full';
-    fields.append(label);
-  }
-  const help = node('p', '', 'status muted');
+  let temporaryValues = {};
   const message = status();
   const actions = node('div', '', 'actions');
-  const editor = node('div', '', 'connection-editor');
-  editor.id = 'connection-editor-' + service;
-  editor.hidden = true;
-  let originalValues;
-  fields.append(field('نام اتصال برای ذخیره', name));
-  const profileId = () => selectedId;
-  const payload = () => ({
-    profileId: profileId(),
-    values: Object.fromEntries(Object.entries(inputs).filter(([, input]) => input.value.trim()).map(([key, input]) => [key, input.value.trim()]))
-  });
-  function updateHelp() {
-    remove.hidden = edit.hidden = !profileId();
-    save.textContent = profileId() ? 'به‌روزرسانی اتصال' : 'ذخیره اتصال';
-    help.textContent = profileId()
-      ? 'برای استفاده از مقدار ذخیره‌شده، فیلد مربوط را خالی بگذارید.'
-      : 'برای تست فوری، فیلدهای اتصال را پر کنید. ذخیره اختیاری است.';
-  }
+  const payload = () => selectedId === null
+    ? { profileId: null, values: { ...temporaryValues } }
+    : { profileId: selectedId };
   let savingOrder = false;
   const sortable = sortableProfiles(choices, moveProfile);
 
@@ -291,17 +384,15 @@ function connectionPanel(service, onChange) {
     const options = [...profiles, { id: null, name: 'افزودن اتصال' }];
     choices.replaceChildren(...options.map((profile, index) => {
       const choice = button('', () => {
-        select(profile.id);
-        if (profile.id == null) openEditor();
+        if (profile.id == null) void editor.open(null, temporaryValues);
+        else select(profile.id);
       }, 'profile-choice');
       const icon = serviceIcon(profile.id == null ? { icon: '+' } : config, 'profile-choice-icon');
       const label = node('span', profile.name);
       choice.append(icon, label);
       choice.setAttribute('aria-pressed', String(selectedId === profile.id));
       if (profile.id == null) {
-        choice.dataset.addConnection = '';
-        choice.setAttribute('aria-controls', editor.id);
-        choice.setAttribute('aria-expanded', String(selectedId === null && !editor.hidden));
+        choice.setAttribute('aria-haspopup', 'dialog');
         return choice;
       }
 
@@ -313,7 +404,10 @@ function connectionPanel(service, onChange) {
         label.append(badge);
         choice.setAttribute('aria-description', 'اتصال پیش‌فرض');
       }
-      card.append(choice);
+      const edit = button('ویرایش', () => void editor.open(profile), 'profile-edit');
+      edit.setAttribute('aria-label', 'ویرایش اتصال ' + profile.name);
+      edit.setAttribute('aria-haspopup', 'dialog');
+      card.append(choice, edit);
       if (profiles.length > 1) {
         const handle = node('button', '⠿', 'profile-grip');
         handle.type = 'button';
@@ -325,7 +419,6 @@ function connectionPanel(service, onChange) {
       }
       return card;
     }));
-    updateHelp();
   }
 
   async function moveProfile(source, target, focus) {
@@ -353,28 +446,10 @@ function connectionPanel(service, onChange) {
     savingOrder = false;
     if (focus) choices.querySelector('[data-profile-id="' + source + '"] .profile-grip')?.focus();
   }
-  function setEditorOpen(open) {
-    editor.hidden = !open;
-    if (!open) originalValues = undefined;
-    edit.setAttribute('aria-expanded', String(open && selectedId !== null));
-    choices.querySelector('[data-add-connection]')?.setAttribute('aria-expanded', String(open && selectedId === null));
-  }
-  function openEditor() {
-    if (editor.hidden) {
-      originalValues = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value]));
-    }
-    setEditorOpen(true);
-    (inputs[config.fields[0]] ?? name).focus();
-  }
   function select(id) {
-    if (picker.disabled) return;
-    const profile = profiles.find(item => item.id === id);
-    if (id != null && !profile) return;
-    if (id === selectedId) return;
+    if (picker.disabled || selectedId === id || !profiles.some(profile => profile.id === id)) return;
     selectedId = id;
-    setEditorOpen(false);
-    for (const input of Object.values(inputs)) input.value = '';
-    name.value = profile?.name ?? '';
+    temporaryValues = {};
     report(message, '');
     renderProfiles();
     choices.querySelector('[aria-pressed="true"]')?.focus();
@@ -383,7 +458,6 @@ function connectionPanel(service, onChange) {
   async function refresh(selected) {
     profiles = await api(service, 'profiles');
     selectedId = selected === undefined ? (profiles[0]?.id ?? null) : selected;
-    name.value = profiles.find(item => item.id === selectedId)?.name ?? '';
     renderProfiles();
   }
   async function busy(operation) {
@@ -395,50 +469,27 @@ function connectionPanel(service, onChange) {
     catch (error) { report(message, error.message, 'error'); }
     finally { for (const control of enabled) control.disabled = false; }
   }
-  const edit = button('ویرایش اتصال', openEditor);
-  edit.setAttribute('aria-controls', editor.id);
-  edit.setAttribute('aria-expanded', 'false');
-  const cancel = button('انصراف', () => {
-    if (originalValues) {
-      for (const [key, value] of Object.entries(originalValues)) inputs[key].value = value;
-    }
-    name.value = profiles.find(item => item.id === selectedId)?.name ?? '';
-    setEditorOpen(false);
-    report(message, '');
-    (selectedId === null ? choices.querySelector('[data-add-connection]') : edit)?.focus();
+  const editor = connectionEditor(service, async input => {
+    const saved = await api(service, 'profiles', input);
+    await refresh(input.profileId === null ? saved.id : selectedId);
+    if (input.profileId === null) temporaryValues = {};
     onChange();
+    report(message, 'اتصال ذخیره شد.', 'ok');
+  }, values => {
+    temporaryValues = values;
+    selectedId = null;
+    renderProfiles();
+    onChange();
+    report(message, 'اتصال موقت آماده تست است.', 'ok');
+  }, async id => {
+    await api(service, 'remove', { profileId: id });
+    await refresh(selectedId === id ? undefined : selectedId);
+    onChange();
+    report(message, 'اتصال حذف شد.', 'ok');
   });
-  const save = button('ذخیره اتصال', () => {
-    if (inputs.site && !inputs.site.reportValidity()) return;
-    void busy(async () => {
-      const saved = await api(service, 'profiles', { ...payload(), name: name.value });
-      await refresh(saved.id);
-      name.value = saved.name;
-      for (const input of Object.values(inputs)) input.value = '';
-      setEditorOpen(false);
-      onChange();
-      report(message, 'اتصال ذخیره شد.', 'ok');
-    });
-  });
-  const remove = button('حذف اتصال', () => {
-    if (!window.confirm('این اتصال از دیتابیس حذف شود؟')) return;
-    void busy(async () => {
-      await api(service, 'remove', { profileId: profileId() });
-      await refresh();
-      for (const input of Object.values(inputs)) input.value = '';
-      setEditorOpen(false);
-      onChange();
-      report(message, 'اتصال حذف شد.', 'ok');
-    });
-  }, 'danger');
-  for (const input of Object.values(inputs)) input.addEventListener('input', onChange);
   form.addEventListener('submit', event => event.preventDefault());
-  const editorActions = node('div', '', 'actions');
-  editorActions.append(save, cancel, remove);
-  editor.append(help, fields, editorActions);
-  actions.append(edit);
-  form.append(heading, picker, actions, editor, message);
-  panel.append(form);
+  form.append(heading, picker, actions, message);
+  panel.append(form, editor.dialog);
   renderProfiles();
   picker.disabled = true;
   const ready = refresh()
@@ -446,7 +497,7 @@ function connectionPanel(service, onChange) {
     .catch(error => report(message, error.message, 'error'))
     .finally(() => { picker.disabled = false; });
   return {
-    panel, form, inputs, actions, payload, busy,
+    panel, form, actions, payload, busy,
     async openProfile(profile) {
       await ready;
       if (!profiles.some(item => item.id === profile.id)) await refresh(selectedId);
@@ -1205,7 +1256,6 @@ function shippingView(service, view) {
     async function send(context = connection.payload(), timeout = requestTimeout) {
       if (sendButton.disabled) return null;
       sendButton.disabled = true;
-      const values = { ...context.values };
       try {
         const body = await editor?.bodyFor(draftScope(context.profileId));
         telemetry.start(timeout);
@@ -1213,21 +1263,13 @@ function shippingView(service, view) {
         response.update('');
         open.hidden = true;
         const result = await sendTest(service, 'run', {
-          profileId: context.profileId, values, endpoint: endpoint.id, body
+          ...context, endpoint: endpoint.id, body
         }, timeout);
         const ok = result.status >= 200 && result.status < 300;
         telemetry.finish('HTTP ' + result.status, ok ? 'ok' : 'error', result.ms);
         try { response.update(JSON.stringify(JSON.parse(result.body), null, 2)); }
         catch { response.update(result.body); }
-        const live = connection.payload();
-        for (const [name, value] of Object.entries(result.captured)) {
-          // Reuse captured IDs inside the batch without changing a different connection or newer input.
-          context.values[name] = value;
-          if (live.profileId === context.profileId && live.values.auth === values.auth &&
-              live.values.shop_id === values.shop_id && live.values[name] === values[name]) {
-            connection.inputs[name].value = value;
-          }
-        }
+        if (context.profileId === null) Object.assign(context.values, result.captured);
         if (endpoint.html && ok) {
           open.href = result.url;
           open.hidden = false;

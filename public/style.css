@@ -202,7 +202,6 @@ dialog::backdrop { background: #070911b8; }
 
 .profile-card { display: flex; min-width: 0; border-radius: 9px; }
 .profile-card .profile-choice { min-width: 0; flex: 1; }
-.profile-card:has(.profile-grip) .profile-choice { border-start-end-radius: 0; border-end-end-radius: 0; }
 .profile-grip {
   flex: 0 0 32px;
   padding: 0;
@@ -222,6 +221,11 @@ dialog::backdrop { background: #070911b8; }
 
 .woo-catalog-picker > button, .woo-status-field > button { margin-top: 7px; }
 
-.connection-editor { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-.connection-editor .status { margin: 0 0 12px; }
 .connection-test-limit { width: 100px; }
+
+.connection-dialog { width: min(610px, calc(100% - 28px)); max-height: 88vh; }
+.connection-dialog fieldset { min-width: 0; margin: 12px 0 0; padding: 0; border: 0; }
+.profile-edit { padding-inline: 6px; border-inline-start: 0; font-size: 11px; flex: 0 0 auto; }
+.profile-card:has(.profile-edit) .profile-choice { border-start-end-radius: 0; border-end-end-radius: 0; }
+.profile-edit { border-start-start-radius: 0; border-end-start-radius: 0; }
+.profile-card:has(.profile-grip) .profile-edit { border-radius: 0; }
